@@ -1,0 +1,6 @@
+{
+  "name": "FocusFlow",
+  "description": "A beautiful premium dark-first focus session manager and deep work companion with local stats, apps restrictor, and custom focus schedules.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
