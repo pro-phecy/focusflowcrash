@@ -2,7 +2,9 @@ package com.example.data
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import com.squareup.moshi.JsonClass
 
+@JsonClass(generateAdapter = true)
 data class AppDefinition(
     val id: String,
     val name: String,
@@ -10,10 +12,12 @@ data class AppDefinition(
     val androidPackage: String  // e.g. "com.whatsapp"
 )
 
+@JsonClass(generateAdapter = true)
 data class ScheduleEntry(
     val day: String,            // "Monday", "Tuesday", etc.
     val startTime: String,      // "HH:MM"
-    val endTime: String         // "HH:MM"
+    val endTime: String,         // "HH:MM"
+    val task: String = "Deep Work" // e.g. "Coding / Dev", "Reading / Research", etc.
 )
 
 @Entity(tableName = "user_profile")

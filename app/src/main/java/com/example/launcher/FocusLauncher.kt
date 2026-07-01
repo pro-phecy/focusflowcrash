@@ -12,9 +12,13 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.*
@@ -25,6 +29,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -33,11 +40,13 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,10 +84,14 @@ fun AppIconImage(packageName: String, modifier: Modifier = Modifier) {
 fun FocusLauncher(
     duration: Int,
     timeLeft: Int,
+    isTimerRunning: Boolean,
     goal: String,
     allowedAppsJson: String,
     isLockRestrictEnabled: Boolean,
     onEnd: (completed: Boolean) -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onResetTimer: () -> Unit,
     onToggleStatusBar: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
@@ -89,7 +102,48 @@ fun FocusLauncher(
     var challengeInput by remember { mutableStateOf("") }
     var countdownSec by remember { mutableStateOf(5) }
 
+    // Auto-hiding HUD mechanism states
+    var isHudVisible by remember { mutableStateOf(true) }
+    var lastInteractionTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    // Tactile continuous hold-to-exit gesture progress
+    var isHolding by remember { mutableStateOf(false) }
+    var holdProgress by remember { mutableStateOf(0f) }
+
+    LaunchedEffect(isHolding) {
+        if (isHolding) {
+            val startTime = System.currentTimeMillis()
+            val durationMs = 1500f // 1.5 seconds hold duration
+            while (isHolding) {
+                val elapsed = System.currentTimeMillis() - startTime
+                holdProgress = (elapsed / durationMs).coerceIn(0f, 1f)
+                if (holdProgress >= 1f) {
+                    showExitSheet = true
+                    isHolding = false
+                    holdProgress = 0f
+                    break
+                }
+                delay(16) // Smooth 60fps refresh
+            }
+        } else {
+            // Smoothly decay the hold progress if released before completion
+            while (holdProgress > 0f) {
+                holdProgress = (holdProgress - 0.08f).coerceAtLeast(0f)
+                delay(16)
+            }
+        }
+    }
+
+    LaunchedEffect(lastInteractionTime) {
+        isHudVisible = true
+        delay(5000)
+        isHudVisible = false
+    }
+
     LaunchedEffect(showExitSheet) {
+        if (showExitSheet) {
+            isHudVisible = true
+        }
         if (showExitSheet && isLockRestrictEnabled) {
             challengeInput = ""
             countdownSec = 5
@@ -101,7 +155,7 @@ fun FocusLauncher(
     }
 
     BackHandler {
-        showExitSheet = true
+        Toast.makeText(context, "Accidental exit prevention: Press and hold the countdown timer or the bottom text to initiate exit.", Toast.LENGTH_LONG).show()
     }
 
     // Observe lifecycle events to hide/lock-task on resume (such as after launching and returning from companion apps)
@@ -110,6 +164,11 @@ fun FocusLauncher(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 onToggleStatusBar(false)
+                try {
+                    context.findActivity()?.startLockTask()
+                } catch (e: Throwable) {
+                    e.printStackTrace()
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -120,16 +179,27 @@ fun FocusLauncher(
 
     // Restore status/navigation bars on exiting Focus mode screen completely
     DisposableEffect(Unit) {
+        val activity = context.findActivity()
+        try {
+            activity?.startLockTask()
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        }
         onDispose {
             onToggleStatusBar(true)
+            try {
+                activity?.stopLockTask()
+            } catch (e: Throwable) {
+                e.printStackTrace()
+            }
         }
     }
 
     // Live Clock State
     var currentTime by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
+        val sdf = SimpleDateFormat("h:mm a", Locale.getDefault())
         while (true) {
-            val sdf = SimpleDateFormat("h:mm a", Locale.getDefault())
             currentTime = sdf.format(Date())
             delay(1000)
         }
@@ -142,15 +212,31 @@ fun FocusLauncher(
     // Gesture control: swipe-down (PanResponder equivalent) threshold ~80dp opens the exit sheet
     var swipeOffsetY by remember { mutableStateOf(0f) }
 
+    val isHudCurrentlyVisible = isHudVisible || showExitSheet
+    val hudAlpha by animateFloatAsState(
+        targetValue = if (isHudCurrentlyVisible) 1f else 0f,
+        animationSpec = if (isHudCurrentlyVisible) androidx.compose.animation.core.tween(300) else androidx.compose.animation.core.tween(1000),
+        label = "HUD Fade"
+    )
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF09090B)) // Colors.bg
             .pointerInput(Unit) {
+                // Instantly wake up HUD on any screen pointer event
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent()
+                        lastInteractionTime = System.currentTimeMillis()
+                    }
+                }
+            }
+            .pointerInput(Unit) {
                 detectDragGestures(
                     onDragEnd = {
                         if (swipeOffsetY > 150) {
-                            showExitSheet = true
+                            Toast.makeText(context, "System Lock active. Press and hold the countdown timer or the bottom text to initiate exit.", Toast.LENGTH_LONG).show()
                         }
                         swipeOffsetY = 0f
                     },
@@ -170,11 +256,11 @@ fun FocusLauncher(
             modifier = Modifier
                 .widthIn(max = 600.dp)
                 .fillMaxSize()
-                .padding(vertical = 48.dp, horizontal = 24.dp),
+                .graphicsLayer(alpha = hudAlpha)
+                .padding(vertical = 24.dp, horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            
             // --- TOP PANEL: Rings & Counter ---
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -185,14 +271,26 @@ fun FocusLauncher(
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(240.dp)
-                        .padding(24.dp)
+                        .size(280.dp)
+                        .padding(16.dp)
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onPress = {
+                                    isHolding = true
+                                    try {
+                                        tryAwaitRelease()
+                                    } finally {
+                                        isHolding = false
+                                    }
+                                }
+                            )
+                        }
                 ) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
-                        val strokeWidth = 8.dp.toPx()
+                        val strokeWidth = 10.dp.toPx()
                         // Secondary track
                         drawCircle(
-                            color = Color(0xFF27272A), // Colors.surfaceAlt
+                            color = Color(0xFF18181B), // Colors.surface
                             style = Stroke(width = strokeWidth)
                         )
                         // Active Arc
@@ -203,6 +301,16 @@ fun FocusLauncher(
                             useCenter = false,
                             style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
                         )
+                        // Tactile continuous hold-to-exit indicator
+                        if (holdProgress > 0f) {
+                            drawArc(
+                                color = Color(0xFFEF4444), // Crimson focus unlock indicator
+                                startAngle = -90f,
+                                sweepAngle = holdProgress * 360f,
+                                useCenter = false,
+                                style = Stroke(width = strokeWidth * 1.5f, cap = StrokeCap.Round)
+                            )
+                        }
                     }
 
                     // Large Digital Text
@@ -212,52 +320,141 @@ fun FocusLauncher(
 
                     Text(
                         text = displayTime,
-                        fontSize = 44.sp,
-                        fontWeight = FontWeight.Light,
+                        fontSize = 54.sp,
+                        fontWeight = FontWeight.ExtraLight,
                         color = Color(0xFFFAFAFA),
                         textAlign = TextAlign.Center
                     )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // Live Clock underneath
                 Text(
                     text = currentTime,
-                    fontSize = 16.sp,
+                    fontSize = 14.sp,
                     color = Color(0xFF71717A), // Colors.textMuted
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Light
                 )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // Timer Controls Row containing distinct Reset, Pause, and Start buttons
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth()
+                ) {
+                    // 1. Reset Button
+                    Button(
+                        onClick = onResetTimer,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF18181B),
+                            contentColor = Color(0xFFFAFAFA)
+                        ),
+                        modifier = Modifier
+                            .height(44.dp)
+                            .weight(1f)
+                            .border(1.dp, Color(0xFF27272A), RoundedCornerShape(12.dp))
+                            .testTag("timer_reset_button")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Reset Timer",
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Reset", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    // 2. Pause Button (Active when timer is running)
+                    Button(
+                        onClick = onPause,
+                        enabled = isTimerRunning,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF18181B),
+                            contentColor = Color(0xFFFAFAFA),
+                            disabledContainerColor = Color(0xFF0C0C0D),
+                            disabledContentColor = Color(0xFF3F3F46)
+                        ),
+                        modifier = Modifier
+                            .height(44.dp)
+                            .weight(1f)
+                            .border(
+                                1.dp,
+                                if (isTimerRunning) Color(0xFF3F3F46) else Color(0xFF18181B),
+                                RoundedCornerShape(12.dp)
+                            )
+                            .testTag("timer_pause_button")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Pause,
+                                contentDescription = "Pause Session",
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Pause", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    // 3. Start Button (Active when timer is paused/stopped)
+                    Button(
+                        onClick = onResume,
+                        enabled = !isTimerRunning,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFFAFAFA),
+                            contentColor = Color(0xFF09090B),
+                            disabledContainerColor = Color(0xFF18181B),
+                            disabledContentColor = Color(0xFF52525B)
+                        ),
+                        modifier = Modifier
+                            .height(44.dp)
+                            .weight(1f)
+                            .testTag("timer_start_button")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Start Session",
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Start", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
 
-            // --- MIDDLE PANEL: Intention ---
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp)
-            ) {
-                Text(
-                    text = "INTENTION",
-                    fontSize = 11.sp,
-                    color = Color(0xFFF97316), // Orange accent
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.5.sp
-                )
-                
-                Spacer(modifier = Modifier.height(8.dp))
-
+            // --- MIDDLE PANEL: Intention (Subtle & Beautifully Centered Goal, No "INTENTION" Header Label) ---
+            if (goal.isNotBlank()) {
                 Text(
                     text = goal,
-                    fontSize = 24.sp,
-                    color = Color(0xFFFAFAFA),
-                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 26.sp,
+                    color = Color(0xFFFAFAFA), // Crisp white text
+                    fontWeight = FontWeight.Normal,
                     textAlign = TextAlign.Center,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 16.dp)
+                    modifier = Modifier.padding(horizontal = 32.dp, vertical = 24.dp)
                 )
             }
 
-            // --- BOTTOM PANEL: Allowed Apps row ---
+            // --- BOTTOM PANEL: Allowed Companion Apps Icon Row (No Header Label, Empty if none) ---
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.fillMaxWidth()
@@ -283,84 +480,127 @@ fun FocusLauncher(
                 }
 
                 if (matchedApps.isNotEmpty()) {
-                    Text(
-                        text = "ALLOWED COMPANIONS",
-                        fontSize = 10.sp,
-                        color = Color(0xFF71717A), // Colors.textMuted
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.5.sp
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    LazyRow(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(rememberScrollState())
                             .padding(bottom = 16.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        contentPadding = PaddingValues(horizontal = 16.dp)
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        items(matchedApps) { app ->
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
+                        matchedApps.forEach { app ->
+                            Box(
+                                contentAlignment = Alignment.Center,
                                 modifier = Modifier
-                                    .padding(horizontal = 12.dp)
-                                    .width(72.dp)
                                     .clickable {
                                         try {
+                                            val activity = context.findActivity()
+                                            try {
+                                                activity?.stopLockTask()
+                                            } catch (e: Throwable) {
+                                                e.printStackTrace()
+                                            }
+                                            
                                             val launchIntent = context.packageManager.getLaunchIntentForPackage(app.packageName)
                                             if (launchIntent != null) {
                                                 context.startActivity(launchIntent)
                                             } else {
                                                 Toast.makeText(context, "Cannot open: ${app.label}", Toast.LENGTH_SHORT).show()
+                                                try {
+                                                    activity?.startLockTask()
+                                                } catch (e: Throwable) {
+                                                    e.printStackTrace()
+                                                }
                                             }
                                         } catch (e: Exception) {
                                             Toast.makeText(context, "Error launching app: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                            try {
+                                                context.findActivity()?.startLockTask()
+                                            } catch (e: Throwable) {
+                                                e.printStackTrace()
+                                            }
                                         }
                                     }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(60.dp)
-                                        .background(Color(0xFF18181B), CircleShape), // Colors.surface
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    AppIconImage(
-                                        packageName = app.packageName,
-                                        modifier = Modifier.size(36.dp)
-                                    )
-                                }
-                                
-                                Spacer(modifier = Modifier.height(6.dp))
-                                
                                 Text(
                                     text = app.label,
-                                    fontSize = 11.sp,
-                                    color = Color(0xFFA1A1AA), // Colors.textSecondary
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Medium,
+                                    fontSize = 15.sp,
+                                    color = Color(0xFFE4E4E7),
+                                    letterSpacing = 1.sp,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
                     }
-                } else {
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "No apps allowed. Stay fully focused.",
-                        fontSize = 13.sp,
-                        color = Color(0xFF71717A)
-                    )
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
-                
-                // Exit Hint Indicator
-                Text(
-                    text = "Swipe down or press back to exit",
-                    fontSize = 11.sp,
-                    color = Color(0xFF52525B), // Colors.textDisabled
-                    textAlign = TextAlign.Center
-                )
+                // A beautiful, highly conspicuous, dedicated Hold-to-Exit bar/button!
+                val holdBorderColor = if (holdProgress > 0f) Color(0xFFEF4444) else Color(0xFF27272A)
+                val holdBgColor = if (holdProgress > 0f) Color(0x1AEF4444) else Color(0xFF18181B)
+                val holdTextColor = if (holdProgress > 0f) Color(0xFFEF4444) else Color(0xFFA1A1AA)
+
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .fillMaxWidth()
+                        .height(56.dp)
+                        .background(holdBgColor, RoundedCornerShape(16.dp))
+                        .border(1.dp, holdBorderColor, RoundedCornerShape(16.dp))
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onPress = {
+                                    isHolding = true
+                                    try {
+                                        tryAwaitRelease()
+                                    } finally {
+                                        isHolding = false
+                                    }
+                                }
+                            )
+                        }
+                        .testTag("hold_to_exit_button"),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    // Progress fill
+                    if (holdProgress > 0f) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(holdProgress)
+                                .background(Color(0xFFEF4444).copy(alpha = 0.25f), RoundedCornerShape(16.dp))
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "Lock icon",
+                            tint = if (holdProgress > 0f) Color(0xFFEF4444) else Color(0xFF71717A),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (holdProgress > 0f) {
+                                "RELEASING LOCK... ${(holdProgress * 100).toInt()}%"
+                            } else {
+                                "PRESS & HOLD TO EXIT SESSION"
+                            },
+                            color = holdTextColor,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+                    }
+                }
             }
         }
 

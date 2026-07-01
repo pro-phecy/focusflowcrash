@@ -70,6 +70,7 @@ data class UserProfileModel(
 
 @JsonClass(generateAdapter = true)
 data class CreateSessionRequest(
+    val id: String? = null,
     val duration: Int,
     val goal: String,
     val allowedApps: List<String>
@@ -94,6 +95,13 @@ data class FocusSessionModel(
 )
 
 @JsonClass(generateAdapter = true)
+data class TaskStatModel(
+    val taskName: String,
+    val minutes: Int,
+    val colorHex: String
+)
+
+@JsonClass(generateAdapter = true)
 data class DailyStatModel(
     val dayLabel: String,
     val dayDate: String,
@@ -105,7 +113,8 @@ data class StatsResponse(
     val daily: List<DailyStatModel>,
     val streak: Int,
     val weekMinutes: Int,
-    val sessionCount: Int
+    val sessionCount: Int,
+    val taskBreakdown: List<TaskStatModel> = emptyList()
 )
 
 @JsonClass(generateAdapter = true)
@@ -169,7 +178,18 @@ class TokenStore(context: Context) {
         private const val ACCESS_TOKEN = "ff_access_token"
         private const val REFRESH_TOKEN = "ff_refresh_token"
         private const val BASE_URL_KEY = "ff_base_url"
+        private const val ANON_KEY = "ff_anon_key"
     }
+
+    var anonKey: String?
+        get() {
+            val v = prefs.getString(ANON_KEY, null)
+            return if (v.isNullOrEmpty()) null else v
+        }
+        set(value) {
+            val v = if (value.isNullOrEmpty()) null else value
+            prefs.edit().putString(ANON_KEY, v).apply()
+        }
 
     var accessToken: String?
         get() {
@@ -193,20 +213,31 @@ class TokenStore(context: Context) {
 
     var baseUrl: String
         get() {
-            val sbUrl = try { com.example.BuildConfig.SUPABASE_URL } catch (e: Exception) { "" }
+            val sbUrl = BuildConfigFieldReader.getFieldString("SUPABASE_URL")
             val isSbUrlValid = sbUrl.isNotEmpty() && sbUrl.startsWith("https://") && !sbUrl.contains("YOUR_SUPABASE")
             val defaultUrl = if (isSbUrlValid) sbUrl else "https://focusflow-rn.onrender.com/"
             
             val stored = prefs.getString(BASE_URL_KEY, defaultUrl) ?: defaultUrl
-            return if (stored == "http://10.0.2.2:4000/") {
+            val cleanStored = if (stored.isEmpty() || stored == "/" || (!stored.startsWith("http://") && !stored.startsWith("https://"))) {
                 defaultUrl
             } else {
                 stored
             }
+            val rawUrl = if (cleanStored == "http://10.0.2.2:4000/") {
+                defaultUrl
+            } else {
+                cleanStored
+            }
+            return if (rawUrl.endsWith("/")) rawUrl else "$rawUrl/"
         }
         set(value) {
-            val formatted = if (value.endsWith("/")) value else "$value/"
-            prefs.edit().putString(BASE_URL_KEY, formatted).apply()
+            val trimmed = value.trim()
+            if (trimmed.isEmpty() || trimmed == "/" || (!trimmed.startsWith("http://") && !trimmed.startsWith("https://"))) {
+                prefs.edit().remove(BASE_URL_KEY).apply()
+            } else {
+                val formatted = if (trimmed.endsWith("/")) trimmed else "$trimmed/"
+                prefs.edit().putString(BASE_URL_KEY, formatted).apply()
+            }
         }
 
     fun clear() {
@@ -222,6 +253,52 @@ class ApiError(val code: Int, message: String) : IOException(message)
 
 class ApiClient private constructor(private val context: Context) {
     val tokenStore = TokenStore(context)
+
+    enum class AuthState {
+        SIGNED_IN,
+        SIGNED_OUT,
+        TOKEN_REFRESHED
+    }
+
+    interface AuthStateListener {
+        fun onAuthStateChanged(event: AuthState, session: UserProfileModel?)
+    }
+
+    private val authStateListeners = java.util.Collections.synchronizedList(mutableListOf<AuthStateListener>())
+
+    fun addAuthStateListener(listener: AuthStateListener) {
+        authStateListeners.add(listener)
+        // Emit current status immediately
+        val token = tokenStore.accessToken
+        if (token != null) {
+            listener.onAuthStateChanged(AuthState.SIGNED_IN, null)
+        } else {
+            listener.onAuthStateChanged(AuthState.SIGNED_OUT, null)
+        }
+    }
+
+    fun removeAuthStateListener(listener: AuthStateListener) {
+        authStateListeners.remove(listener)
+    }
+
+    fun notifyAuthStateChanged(event: AuthState, session: UserProfileModel?) {
+        val listCopy = synchronized(authStateListeners) {
+            java.util.ArrayList(authStateListeners)
+        }
+        for (listener in listCopy) {
+            try {
+                listener.onAuthStateChanged(event, session)
+            } catch (e: Exception) {
+                android.util.Log.e("ApiClient", "Error notifying auth state listener", e)
+            }
+        }
+    }
+
+    fun logoutAndClear() {
+        tokenStore.clear()
+        notifyAuthStateChanged(AuthState.SIGNED_OUT, null)
+    }
+    
     
     private val moshi = Moshi.Builder()
         .add(KotlinJsonAdapterFactory())
@@ -377,10 +454,15 @@ class ApiClient private constructor(private val context: Context) {
         val baseUrlStr = tokenStore.baseUrl
         val isSupabase = baseUrlStr.contains("supabase.co")
         val anonKey = if (isSupabase) {
-            try { com.example.BuildConfig.SUPABASE_ANON_KEY } catch (e: Exception) { "" }
+            val custom = tokenStore.anonKey
+            if (!custom.isNullOrEmpty()) {
+                custom
+            } else {
+                BuildConfigFieldReader.getFieldString("SUPABASE_ANON_KEY")
+            }
         } else ""
 
-        if (isSupabase) {
+        if (isSupabase && anonKey.isNotEmpty()) {
             builder.header("apikey", anonKey)
         }
 
@@ -564,7 +646,7 @@ class ApiClient private constructor(private val context: Context) {
                 val refreshToken = tokenStore.refreshToken
 
                 if (refreshToken == null) {
-                    tokenStore.clear()
+                    logoutAndClear()
                     throw ApiError(401, "Session expired (No refresh token)")
                 }
 
@@ -648,7 +730,7 @@ class ApiClient private constructor(private val context: Context) {
                     val isAuthError = refreshResponse.code in 400..403
                     refreshResponse.close()
                     if (isAuthError) {
-                        tokenStore.clear()
+                        logoutAndClear()
                         throw ApiError(401, "Session expired")
                     } else {
                         throw IOException("Temporary server error during token refresh (HTTP ${refreshResponse.code})")

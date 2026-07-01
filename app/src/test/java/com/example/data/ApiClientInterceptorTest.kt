@@ -398,4 +398,23 @@ class ApiClientInterceptorTest {
         assertTrue(reqBody!!.contains("p_user_id"))
         assertTrue(reqBody.contains("user-444"))
     }
+
+    @Test
+    fun testSessionsGetRequest() {
+        val client = buildTestOkHttpClient()
+        apiClient.tokenStore.accessToken = "dummy_jwt"
+
+        val request = Request.Builder()
+            .url("https://abcdefghij.supabase.co/sessions")
+            .get()
+            .build()
+
+        val response = client.newCall(request).execute()
+        assertTrue(response.isSuccessful)
+
+        val req = capturedRequest
+        assertNotNull(req)
+        assertEquals("/rest/v1/sessions", req!!.url.encodedPath)
+        assertEquals("started_at.desc", req.url.queryParameter("order"))
+    }
 }

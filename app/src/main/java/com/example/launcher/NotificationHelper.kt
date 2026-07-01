@@ -62,6 +62,7 @@ object NotificationHelper {
             putExtra("day", entry.day)
             putExtra("startTime", entry.startTime)
             putExtra("endTime", entry.endTime)
+            putExtra("task", entry.task)
         }
         
         val requestCode = "${entry.day}-${entry.startTime}".hashCode()
@@ -94,6 +95,55 @@ object NotificationHelper {
         val pendingIntent = PendingIntent.getBroadcast(
             context,
             requestCode,
+            intent,
+            PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+        )
+        if (pendingIntent != null) {
+            alarmManager.cancel(pendingIntent)
+            pendingIntent.cancel()
+        }
+    }
+
+    fun scheduleSessionEndAlarm(context: Context, durationSeconds: Int) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        val intent = Intent(context, ScheduleReceiver::class.java).apply {
+            action = "com.example.SESSION_TIMER_COMPLETE"
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            9999, // Unique request code for active session alarm
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val triggerTime = System.currentTimeMillis() + (durationSeconds * 1000L)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
+            } else {
+                alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
+            }
+        } catch (e: Exception) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
+                } else {
+                    alarmManager.set(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
+                }
+            } catch (ex: Exception) {
+                ex.printStackTrace()
+            }
+        }
+    }
+
+    fun cancelSessionEndAlarm(context: Context) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        val intent = Intent(context, ScheduleReceiver::class.java).apply {
+            action = "com.example.SESSION_TIMER_COMPLETE"
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            9999,
             intent,
             PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
         )
