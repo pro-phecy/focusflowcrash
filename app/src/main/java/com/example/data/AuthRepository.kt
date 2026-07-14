@@ -49,9 +49,14 @@ class AuthRepository private constructor(context: Context) {
             val response = apiClient.api.login(LoginRequest(emailParam, passwordParam))
             Result.Success(response)
         } catch (e: Exception) {
-            val isCredentialsError = e is ApiError && (e.code == 400 || e.code == 401 || e.code == 403)
+            val code = when (e) {
+                is ApiError -> e.code
+                is retrofit2.HttpException -> e.code()
+                else -> -1
+            }
+            val isCredentialsError = code == 400 || code == 401 || code == 403
             val errMsg = if (isCredentialsError) {
-                "Invalid email or password."
+                "Incorrect email or password."
             } else {
                 "Authentication failed: ${e.localizedMessage ?: "Network or database connection issue"}"
             }
@@ -85,12 +90,16 @@ class AuthRepository private constructor(context: Context) {
             val response = apiClient.api.register(RegisterRequest(emailParam, passwordParam, displayNameParam))
             Result.Success(response)
         } catch (e: Exception) {
-            val isRegistrationError = e is ApiError && (e.code == 400 || e.code == 409 || e.code == 422)
-            val errMsg = if (e is ApiError) {
-                when (e.code) {
+            val code = when (e) {
+                is ApiError -> e.code
+                is retrofit2.HttpException -> e.code()
+                else -> -1
+            }
+            val errMsg = if (code != -1) {
+                when (code) {
                     422 -> "Supabase: Password too weak or invalid email address."
                     409 -> "Supabase: This email address is already registered."
-                    else -> "Supabase registration failed (${e.code}): ${e.localizedMessage ?: "Unknown database error"}"
+                    else -> "Supabase registration failed ($code): ${e.localizedMessage ?: "Unknown database error"}"
                 }
             } else {
                 "Registration failed: ${e.localizedMessage ?: "Network or database connection issue"}"

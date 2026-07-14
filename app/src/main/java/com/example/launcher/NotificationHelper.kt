@@ -14,15 +14,21 @@ import java.util.Calendar
 import java.util.Locale
 
 object NotificationHelper {
-    private const val CHANNEL_ID = "focusflow_channel"
-    private const val CHANNEL_NAME = "FocusFlow Notifications"
-    private const val CHANNEL_DESC = "Notifications and status updates from FocusFlow"
+    private const val CHANNEL_ID = "focusflow_push_channel"
+    private const val CHANNEL_NAME = "FocusFlow Alerts"
+    private const val CHANNEL_DESC = "Push alerts and focus reminders from FocusFlow"
 
     fun createNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val importance = NotificationManager.IMPORTANCE_HIGH
             val channel = NotificationChannel(CHANNEL_ID, CHANNEL_NAME, importance).apply {
                 description = CHANNEL_DESC
+                enableLights(true)
+                lightColor = android.graphics.Color.RED
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 250, 250, 250)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                setBypassDnd(true)
             }
             val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.createNotificationChannel(channel)
@@ -31,24 +37,32 @@ object NotificationHelper {
 
     fun sendNotification(context: Context, title: String, content: String) {
         try {
-            createNotificationChannel(context)
-            val intent = Intent(context, MainActivity::class.java).apply {
+            val appContext = context.applicationContext
+            createNotificationChannel(appContext)
+            val intent = Intent(appContext, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
             }
             val pendingIntent = PendingIntent.getActivity(
-                context, 0, intent,
+                appContext, 0, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-            val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
+            val soundUri = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION)
+
+            val builder = NotificationCompat.Builder(appContext, CHANNEL_ID)
+                .setSmallIcon(com.example.R.mipmap.ic_launcher)
                 .setContentTitle(title)
                 .setContentText(content)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                .setSound(soundUri)
+                .setVibrate(longArrayOf(0, 250, 250, 250))
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setContentIntent(pendingIntent)
                 .setAutoCancel(true)
 
-            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val notificationManager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.notify(System.currentTimeMillis().toInt(), builder.build())
         } catch (e: Throwable) {
             e.printStackTrace()
@@ -75,15 +89,7 @@ object NotificationHelper {
 
         val triggerTime = getNextTriggerTime(entry.day, entry.startTime) ?: return
 
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
-            } else {
-                alarmManager.set(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        setExactAlarmSafely(alarmManager, triggerTime, pendingIntent)
     }
 
     fun cancelScheduledNotification(context: Context, entry: ScheduleEntry) {
@@ -117,8 +123,15 @@ object NotificationHelper {
         )
 
         val triggerTime = System.currentTimeMillis() + (durationSeconds * 1000L)
+        setExactAlarmSafely(alarmManager, triggerTime, pendingIntent)
+    }
+
+    private fun setExactAlarmSafely(alarmManager: AlarmManager, triggerTime: Long, pendingIntent: PendingIntent) {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                val alarmClockInfo = AlarmManager.AlarmClockInfo(triggerTime, pendingIntent)
+                alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
             } else {
                 alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
@@ -155,10 +168,29 @@ object NotificationHelper {
 
     private fun getNextTriggerTime(dayName: String, timeStr: String): Long? {
         try {
-            val parts = timeStr.split(":")
+            val cleanedTime = timeStr.trim()
+            val isPm = cleanedTime.endsWith("PM", ignoreCase = true)
+            val isAm = cleanedTime.endsWith("AM", ignoreCase = true)
+            
+            // Remove AM/PM suffix for splitting
+            val timeWithoutAmPm = cleanedTime
+                .replace("AM", "", ignoreCase = true)
+                .replace("PM", "", ignoreCase = true)
+                .trim()
+
+            val parts = timeWithoutAmPm.split(":")
             if (parts.size != 2) return null
-            val hour = parts[0].toIntOrNull() ?: return null
+            var hour = parts[0].toIntOrNull() ?: return null
             val minute = parts[1].toIntOrNull() ?: return null
+
+            if (isPm || isAm) {
+                // 12-hour format conversion to 24-hour format
+                if (isPm && hour < 12) {
+                    hour += 12
+                } else if (isAm && hour == 12) {
+                    hour = 0
+                }
+            }
 
             val calendar = Calendar.getInstance().apply {
                 set(Calendar.HOUR_OF_DAY, hour)

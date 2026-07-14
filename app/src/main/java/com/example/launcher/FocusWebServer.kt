@@ -1,6 +1,8 @@
 package com.example.launcher
 
+import android.content.Context
 import android.util.Log
+import com.example.data.AppDatabase
 import kotlinx.coroutines.*
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -16,11 +18,13 @@ object FocusWebServer {
     private var serverSocket: ServerSocket? = null
     private var serverJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var appContext: Context? = null
 
     // Keep track of active SSE connection streams
     private val activeClients = Collections.synchronizedSet(mutableSetOf<OutputStream>())
 
-    fun start() {
+    fun start(context: Context) {
+        appContext = context.applicationContext
         if (serverJob != null && serverJob?.isActive == true) {
             Log.d(TAG, "Server already running.")
             return
@@ -112,9 +116,27 @@ object FocusWebServer {
                             socket.close()
                         } catch (e: Exception) {}
                     }
+                } else if (path == "/sw.js") {
+                    // Serve Service Worker
+                    val sw = getServiceWorkerContent()
+                    val swBytes = sw.toByteArray(Charsets.UTF_8)
+                    val responseHeaders = """
+                        HTTP/1.1 200 OK
+                        Content-Type: application/javascript; charset=UTF-8
+                        Content-Length: ${swBytes.size}
+                        Access-Control-Allow-Origin: *
+                        Connection: close
+                        
+                        
+                    """.trimIndent()
+
+                    out.write(responseHeaders.replace("\n", "\r\n").toByteArray())
+                    out.write(swBytes)
+                    out.flush()
+                    socket.close()
                 } else {
                     // Serve index.html
-                    val html = getHtmlContent()
+                    val html = getHtmlContent(appContext)
                     val htmlBytes = html.toByteArray(Charsets.UTF_8)
                     val responseHeaders = """
                         HTTP/1.1 200 OK
@@ -140,9 +162,9 @@ object FocusWebServer {
         }
     }
 
-    fun broadcastEvent(type: String, goal: String = "") {
+    fun broadcastEvent(type: String, goal: String = "", durationSeconds: Int = 0) {
         scope.launch(Dispatchers.IO) {
-            val json = """{"type":"$type","goal":"$goal"}"""
+            val json = """{"type":"$type","goal":"$goal","durationSeconds":$durationSeconds}"""
             val sseData = "data: $json\r\n\r\n"
             val dataBytes = sseData.toByteArray(Charsets.UTF_8)
 
@@ -162,7 +184,20 @@ object FocusWebServer {
         }
     }
 
-    private fun getHtmlContent(): String {
+    private suspend fun getHtmlContent(context: Context?): String {
+        var notifsEnabled = true
+        if (context != null) {
+            try {
+                val db = AppDatabase.getDatabase(context)
+                val profile = db.userProfileDao().getProfile()
+                if (profile != null) {
+                    notifsEnabled = profile.notifications ?: true
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
         return """
             <!DOCTYPE html>
             <html lang="en">
@@ -254,6 +289,64 @@ object FocusWebServer {
                     const statusDiv = document.getElementById('status');
                     const notifyBtn = document.getElementById('notify-btn');
                     const testBtn = document.getElementById('test-btn');
+                    let activeNotifications = [];
+                    let appNotificationsEnabled = $notifsEnabled;
+
+                    if (!appNotificationsEnabled) {
+                        statusDiv.innerHTML = "🔕 <strong>Notifications Disabled in App</strong><br><span style='font-size: 14px; color: #a1a1aa;'>Please enable notifications in the FocusFlow Android settings.</span>";
+                    }
+
+                    // Register Service Worker
+                    let swRegistration = null;
+                    if ('serviceWorker' in navigator) {
+                        navigator.serviceWorker.register('/sw.js')
+                            .then(registration => {
+                                console.log('Service Worker registered with scope:', registration.scope);
+                                swRegistration = registration;
+                            })
+                            .catch(error => {
+                                console.error('Service Worker registration failed:', error);
+                            });
+                    }
+
+                    function trackNotification(notification) {
+                        if (notification) {
+                            activeNotifications.push(notification);
+                            notification.onclose = () => {
+                                activeNotifications = activeNotifications.filter(n => n !== notification);
+                            };
+                        }
+                    }
+
+                    // Helper function to show notifications (routes via Service Worker if available for background reliability)
+                    function showWebNotification(title, bodyText, tagId, iconUrl) {
+                        if (!appNotificationsEnabled) return;
+                        if (Notification.permission !== 'granted') return;
+
+                        const options = {
+                            body: bodyText,
+                            tag: tagId || 'focusflow-session',
+                            requireInteraction: true,
+                            icon: iconUrl || 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png'
+                        };
+
+                        if (swRegistration && swRegistration.active) {
+                            swRegistration.active.postMessage({
+                                action: 'show-notification',
+                                title: title,
+                                body: options.body,
+                                tag: options.tag,
+                                icon: options.icon
+                            });
+                        } else {
+                            try {
+                                const notification = new Notification(title, options);
+                                trackNotification(notification);
+                            } catch (e) {
+                                console.error('Standard Notification failed:', e);
+                            }
+                        }
+                    }
 
                     // Request notification permission
                     notifyBtn.addEventListener('click', () => {
@@ -263,10 +356,7 @@ object FocusWebServer {
                         }
                         Notification.requestPermission().then(permission => {
                             if (permission === 'granted') {
-                                new Notification('FocusFlow Connected', {
-                                    body: 'Browser notifications are now connected and enabled!',
-                                    icon: 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png'
-                                });
+                                showWebNotification('FocusFlow Connected', 'Browser notifications are now connected and enabled!', 'focusflow-connected');
                             } else {
                                 alert("Notification permission was denied.");
                             }
@@ -275,11 +365,12 @@ object FocusWebServer {
 
                     // Test notification
                     testBtn.addEventListener('click', () => {
+                        if (!appNotificationsEnabled) {
+                            alert("Notifications are currently disabled in the FocusFlow Android settings.");
+                            return;
+                        }
                         if (Notification.permission === 'granted') {
-                            new Notification('FocusFlow Test', {
-                                body: 'Your browser notifications are working perfectly!',
-                                icon: 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png'
-                            });
+                            showWebNotification('FocusFlow Test', 'Your browser notifications are working perfectly!', 'focusflow-test');
                         } else {
                             alert("Please enable notifications first by clicking the blue button.");
                         }
@@ -290,7 +381,11 @@ object FocusWebServer {
                         const eventSource = new EventSource('/events');
                         
                         eventSource.onopen = () => {
-                            statusDiv.innerHTML = "🟢 <strong>Companion Connected</strong><br><span style='font-size: 14px; color: #a1a1aa;'>Listening for FocusFlow app events...</span>";
+                            if (appNotificationsEnabled) {
+                                statusDiv.innerHTML = "🟢 <strong>Companion Connected</strong><br><span style='font-size: 14px; color: #a1a1aa;'>Listening for FocusFlow app events...</span>";
+                            } else {
+                                statusDiv.innerHTML = "🔕 <strong>Notifications Disabled in App</strong><br><span style='font-size: 14px; color: #a1a1aa;'>Please enable notifications in the FocusFlow Android settings.</span>";
+                            }
                             statusDiv.className = "status";
                         };
 
@@ -298,61 +393,109 @@ object FocusWebServer {
                             console.log("Received event:", event.data);
                             try {
                                 const data = JSON.parse(event.data);
+                                
+                                if (data.type === 'disable_notifications') {
+                                    appNotificationsEnabled = false;
+                                    statusDiv.innerHTML = "🔕 <strong>Notifications Disabled in App</strong><br><span style='font-size: 14px; color: #a1a1aa;'>Please enable notifications in the FocusFlow Android settings.</span>";
+                                    statusDiv.className = "status";
+                                    
+                                    // Close and clear standard notifications
+                                    activeNotifications.forEach(n => {
+                                        try { n.close(); } catch(e) {}
+                                    });
+                                    activeNotifications = [];
+
+                                    // Cancel Service Worker timers and close SW notifications
+                                    if (swRegistration && swRegistration.active) {
+                                        swRegistration.active.postMessage({
+                                            action: 'cancel-notification',
+                                            id: 'session-end'
+                                        });
+                                        swRegistration.active.postMessage({
+                                            action: 'close-all-notifications'
+                                        });
+                                    }
+                                    return;
+                                } else if (data.type === 'enable_notifications') {
+                                    appNotificationsEnabled = true;
+                                    statusDiv.innerHTML = "🟢 <strong>Companion Connected</strong><br><span style='font-size: 14px; color: #a1a1aa;'>Listening for FocusFlow app events...</span>";
+                                    statusDiv.className = "status";
+                                    return;
+                                }
+
                                 if (data.type === 'start') {
                                     statusDiv.innerHTML = "🔥 <strong>Focus Session Active</strong><br><span style='font-size: 16px; color: #34d399;'>Goal: " + (data.goal || 'Deep Focus') + "</span>";
                                     statusDiv.className = "status active";
                                     
-                                    if (Notification.permission === 'granted') {
-                                        new Notification('Focus Session Started!', {
-                                            body: 'Time to focus! Current task: ' + (data.goal || 'Deep Focus'),
-                                            tag: 'focusflow-session',
-                                            requireInteraction: true,
-                                            icon: 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png'
+                                    showWebNotification('Focus Session Started!', 'Time to focus! Current task: ' + (data.goal || 'Deep Focus'), 'focusflow-session', 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png');
+
+                                    // Schedule end alert via Service Worker to bypass browser-native background throttling
+                                    if (data.durationSeconds && data.durationSeconds > 0 && swRegistration && swRegistration.active) {
+                                        swRegistration.active.postMessage({
+                                            action: 'schedule-notification',
+                                            id: 'session-end',
+                                            title: 'Focus Session Completed! 🎉',
+                                            body: 'Fantastic work! You successfully completed your session.',
+                                            delayMs: data.durationSeconds * 1000,
+                                            icon: 'https://cdn-icons-png.flaticon.com/512/1164/1164620.png',
+                                            tag: 'focusflow-session'
                                         });
                                     }
                                 } else if (data.type === 'end') {
                                     statusDiv.innerHTML = "😴 <strong>Focus Session Completed!</strong><br><span style='font-size: 14px; color: #a1a1aa;'>Excellent job! You finished your session.</span>";
                                     statusDiv.className = "status";
                                     
-                                    if (Notification.permission === 'granted') {
-                                        new Notification('Focus Session Completed! 🎉', {
-                                            body: 'Fantastic work! You successfully completed your session.',
-                                            tag: 'focusflow-session',
-                                            requireInteraction: true,
-                                            icon: 'https://cdn-icons-png.flaticon.com/512/1164/1164620.png'
+                                    showWebNotification('Focus Session Completed! 🎉', 'Fantastic work! You successfully completed your session.', 'focusflow-session', 'https://cdn-icons-png.flaticon.com/512/1164/1164620.png');
+
+                                    // Cancel any pending timer in SW
+                                    if (swRegistration && swRegistration.active) {
+                                        swRegistration.active.postMessage({
+                                            action: 'cancel-notification',
+                                            id: 'session-end'
                                         });
                                     }
                                 } else if (data.type === 'cancel') {
                                     statusDiv.innerHTML = "⏹️ <strong>Focus Session Ended Early</strong><br><span style='font-size: 14px; color: #a1a1aa;'>Ready for the next one.</span>";
                                     statusDiv.className = "status";
                                     
-                                    if (Notification.permission === 'granted') {
-                                        new Notification('Focus Session Stopped', {
-                                            body: 'The active focus session was ended early.',
-                                            tag: 'focusflow-session',
-                                            icon: 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png'
+                                    showWebNotification('Focus Session Stopped', 'The active focus session was ended early.', 'focusflow-session', 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png');
+
+                                    // Cancel any pending timer in SW
+                                    if (swRegistration && swRegistration.active) {
+                                        swRegistration.active.postMessage({
+                                            action: 'cancel-notification',
+                                            id: 'session-end'
                                         });
                                     }
                                 } else if (data.type === 'pause') {
                                     statusDiv.innerHTML = "⏸️ <strong>Focus Session Paused</strong><br><span style='font-size: 14px; color: #a1a1aa;'>Remaining time is paused.</span>";
                                     statusDiv.className = "status";
                                     
-                                    if (Notification.permission === 'granted') {
-                                        new Notification('Focus Session Paused', {
-                                            body: 'The session has been paused.',
-                                            tag: 'focusflow-session',
-                                            icon: 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png'
+                                    showWebNotification('Focus Session Paused', 'The session has been paused.', 'focusflow-session', 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png');
+
+                                    // Cancel pending timer since it's paused
+                                    if (swRegistration && swRegistration.active) {
+                                        swRegistration.active.postMessage({
+                                            action: 'cancel-notification',
+                                            id: 'session-end'
                                         });
                                     }
                                 } else if (data.type === 'resume') {
                                     statusDiv.innerHTML = "🔥 <strong>Focus Session Active (Resumed)</strong><br><span style='font-size: 16px; color: #34d399;'>Goal: " + (data.goal || 'Deep Focus') + "</span>";
                                     statusDiv.className = "status active";
                                     
-                                    if (Notification.permission === 'granted') {
-                                        new Notification('Focus Session Resumed!', {
-                                            body: 'Let\'s get back to focusing!',
-                                            tag: 'focusflow-session',
-                                            icon: 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png'
+                                    showWebNotification('Focus Session Resumed!', 'Let\'s get back to focusing!', 'focusflow-session', 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png');
+
+                                    // Schedule end alert with the remaining time via Service Worker
+                                    if (data.durationSeconds && data.durationSeconds > 0 && swRegistration && swRegistration.active) {
+                                        swRegistration.active.postMessage({
+                                            action: 'schedule-notification',
+                                            id: 'session-end',
+                                            title: 'Focus Session Completed! 🎉',
+                                            body: 'Fantastic work! You successfully completed your session.',
+                                            delayMs: data.durationSeconds * 1000,
+                                            icon: 'https://cdn-icons-png.flaticon.com/512/1164/1164620.png',
+                                            tag: 'focusflow-session'
                                         });
                                     }
                                 }
@@ -373,6 +516,102 @@ object FocusWebServer {
                 </script>
             </body>
             </html>
+        """.trimIndent()
+    }
+
+    private fun getServiceWorkerContent(): String {
+        return """
+            // Service Worker to handle notifications in the background
+            self.addEventListener('install', (event) => {
+                self.skipWaiting();
+                console.log('Service Worker installed.');
+            });
+
+            self.addEventListener('activate', (event) => {
+                event.waitUntil(self.clients.claim());
+                console.log('Service Worker activated.');
+            });
+
+            // Store scheduled timers in memory
+            const scheduledTimers = new Map();
+
+            self.addEventListener('message', (event) => {
+                const data = event.data;
+                if (!data) return;
+
+                console.log('SW received message:', data);
+
+                if (data.action === 'show-notification') {
+                    // Immediate notification
+                    showNotificationSafely(data.title, {
+                        body: data.body,
+                        icon: data.icon || 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png',
+                        tag: data.tag || 'focusflow-session',
+                        requireInteraction: true
+                    });
+                } else if (data.action === 'schedule-notification') {
+                    // Schedule a notification for later
+                    const id = data.id;
+                    const title = data.title;
+                    const body = data.body;
+                    const delayMs = data.delayMs;
+                    const icon = data.icon;
+                    const tag = data.tag;
+                    
+                    // Cancel existing timer with same id if any
+                    if (scheduledTimers.has(id)) {
+                        clearTimeout(scheduledTimers.get(id));
+                        scheduledTimers.delete(id);
+                    }
+
+                    if (delayMs > 0) {
+                        const timerId = setTimeout(() => {
+                            showNotificationSafely(title, {
+                                body: body,
+                                icon: icon || 'https://cdn-icons-png.flaticon.com/512/3569/3569434.png',
+                                tag: tag || 'focusflow-session',
+                                requireInteraction: true
+                            });
+                            scheduledTimers.delete(id);
+                        }, delayMs);
+                        
+                        scheduledTimers.set(id, timerId);
+                        console.log('Scheduled notification "' + title + '" in ' + delayMs + 'ms with ID: ' + id);
+                    }
+                } else if (data.action === 'cancel-notification') {
+                    const id = data.id;
+                    if (scheduledTimers.has(id)) {
+                        clearTimeout(scheduledTimers.get(id));
+                        scheduledTimers.delete(id);
+                        console.log('Cancelled scheduled notification with ID: ' + id);
+                    }
+                } else if (data.action === 'close-all-notifications') {
+                    self.registration.getNotifications().then(notifications => {
+                        notifications.forEach(notification => {
+                            notification.close();
+                        });
+                    });
+                }
+            });
+
+            function showNotificationSafely(title, options) {
+                self.registration.showNotification(title, options)
+                    .then(() => console.log('Notification displayed: ' + title))
+                    .catch(err => console.error('Error showing notification in SW:', err));
+            }
+
+            // Handle notification click to focus/open the companion app
+            self.addEventListener('notificationclick', (event) => {
+                event.notification.close();
+                event.waitUntil(
+                    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+                        if (clientList.length > 0) {
+                            return clientList[0].focus();
+                        }
+                        return self.clients.openWindow('/');
+                    })
+                );
+            });
         """.trimIndent()
     }
 }

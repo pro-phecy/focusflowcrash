@@ -1,6 +1,7 @@
 package com.example.launcher
 
 import android.os.Build
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -96,16 +97,47 @@ fun Modifier.glassmorphic(
 @Composable
 fun AmbientGlowingBackground(
     modifier: Modifier = Modifier,
+    isBreak: Boolean = false,
     content: @Composable BoxScope.() -> Unit
 ) {
     val isDark = FFColors.isDark
     
     val baseBgColor = if (isDark) Color(0xFF09090B) else Color(0xFFFAFAFA)
     
-    // Dynamic soft colors for glowing background blobs
-    val glowColor1 = if (isDark) Color(0x33F97316) else Color(0x11F97316) // Soft ambient Orange
-    val glowColor2 = if (isDark) Color(0x223B82F6) else Color(0x0C3B82F6) // Soft ambient Blue
-    val glowColor3 = if (isDark) Color(0x1FA855F7) else Color(0x08A855F7) // Soft ambient Purple
+    // Dynamic soft colors for glowing background blobs with immersive color-shifting animation
+    val targetColor1 = if (isBreak) {
+        if (isDark) Color(0x2810B981) else Color(0x0C10B981) // Soft ambient Emerald Green
+    } else {
+        if (isDark) Color(0x33F97316) else Color(0x11F97316) // Soft ambient Orange
+    }
+
+    val targetColor2 = if (isBreak) {
+        if (isDark) Color(0x1F06B6D4) else Color(0x0806B6D4) // Soft ambient Cool Teal
+    } else {
+        if (isDark) Color(0x223B82F6) else Color(0x0C3B82F6) // Soft ambient Deep Blue
+    }
+
+    val targetColor3 = if (isBreak) {
+        if (isDark) Color(0x1F3B82F6) else Color(0x083B82F6) // Soft ambient Soft Blue
+    } else {
+        if (isDark) Color(0x1FA855F7) else Color(0x08A855F7) // Soft ambient Purple
+    }
+
+    val glowColor1 by animateColorAsState(
+        targetValue = targetColor1,
+        animationSpec = tween(1200, easing = EaseInOutQuad),
+        label = "glowColor1"
+    )
+    val glowColor2 by animateColorAsState(
+        targetValue = targetColor2,
+        animationSpec = tween(1200, easing = EaseInOutQuad),
+        label = "glowColor2"
+    )
+    val glowColor3 by animateColorAsState(
+        targetValue = targetColor3,
+        animationSpec = tween(1200, easing = EaseInOutQuad),
+        label = "glowColor3"
+    )
 
     Box(
         modifier = modifier

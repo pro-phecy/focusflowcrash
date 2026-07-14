@@ -52,7 +52,28 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         
         // Start Focus Companion Web Server for Browser/Desktop Notifications
-        FocusWebServer.start()
+        FocusWebServer.start(applicationContext)
+
+        // Schedule periodic background push notifications (using WorkManager) when the app is closed
+        try {
+            com.example.launcher.NotificationSyncWorker.schedule(applicationContext)
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        }
+
+        // Fetch and register FCM registration token for background push notifications
+        try {
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                if (task.isSuccessful) {
+                    val token = task.result
+                    if (token != null) {
+                        com.example.launcher.FocusFirebaseMessagingService.saveTokenLocally(applicationContext, token)
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        }
         
         // Request POST_NOTIFICATIONS permission for Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

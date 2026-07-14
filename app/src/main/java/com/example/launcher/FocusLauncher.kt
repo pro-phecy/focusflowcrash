@@ -9,7 +9,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.animation.*
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.*
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -38,7 +39,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -211,6 +214,14 @@ fun FocusLauncher(
 
     // Gesture control: swipe-down (PanResponder equivalent) threshold ~80dp opens the exit sheet
     var swipeOffsetY by remember { mutableStateOf(0f) }
+    var isBreakState by remember { mutableStateOf(false) }
+
+    // Immersive focus vs break color definitions
+    val arcColorTarget = if (isBreakState) Color(0xFF10B981) else FFColors.orange
+    val arcColor by animateColorAsState(targetValue = arcColorTarget, animationSpec = tween(800), label = "arcColor")
+
+    val stateTitleColorTarget = if (isBreakState) Color(0xFF10B981) else FFColors.orange
+    val stateTitleColor by animateColorAsState(targetValue = stateTitleColorTarget, animationSpec = tween(800), label = "stateTitleColor")
 
     val isHudCurrentlyVisible = isHudVisible || showExitSheet
     val hudAlpha by animateFloatAsState(
@@ -219,10 +230,10 @@ fun FocusLauncher(
         label = "HUD Fade"
     )
 
-    Box(
+    AmbientGlowingBackground(
+        isBreak = isBreakState,
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF09090B)) // Colors.bg
             .pointerInput(Unit) {
                 // Instantly wake up HUD on any screen pointer event
                 awaitPointerEventScope {
@@ -249,19 +260,124 @@ fun FocusLauncher(
                     }
                 )
             }
-            .testTag("focus_launcher_screen"),
-        contentAlignment = Alignment.TopCenter
+            .testTag("focus_launcher_screen")
     ) {
-        Column(
-            modifier = Modifier
-                .widthIn(max = 600.dp)
-                .fillMaxSize()
-                .graphicsLayer(alpha = hudAlpha)
-                .padding(vertical = 24.dp, horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
-        ) {
-            // --- TOP PANEL: Rings & Counter ---
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val parentWidth = maxWidth
+            val parentHeight = maxHeight
+
+            // Device-safe percentage ratios for elegant responsiveness based on parent container dimensions rather than fixed pixel values
+            val responsiveHSpacing = (parentWidth * 0.055f).coerceIn(16.dp, 28.dp)
+            val responsiveVSpacing = (parentHeight * 0.04f).coerceIn(16.dp, 36.dp)
+            val circularRingSize = (parentHeight * 0.35f).coerceIn(180.dp, 260.dp)
+
+            val baseScale = (parentWidth.value / 360f).coerceIn(0.85f, 1.25f)
+            val displayTimeFontSize = (58 * baseScale).sp
+            val companionIconSize = (14 * baseScale).coerceIn(12f, 18f).dp
+
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 600.dp)
+                    .fillMaxSize()
+                    .graphicsLayer(alpha = hudAlpha)
+                    .padding(vertical = responsiveVSpacing, horizontal = responsiveHSpacing),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+            // --- TOP SECTION: Minimalist Goal reminder & State switcher ---
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (goal.isNotBlank()) {
+                    Text(
+                        text = if (isBreakState) "REST PERIOD" else goal.uppercase(),
+                        fontSize = (11 * baseScale).sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = stateTitleColor, // Beautiful color-shifted text
+                        letterSpacing = 1.5.sp,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = responsiveHSpacing, vertical = (responsiveVSpacing / 3f).coerceAtLeast(4.dp))
+                    )
+                } else {
+                    Spacer(modifier = Modifier.height(responsiveVSpacing))
+                }
+
+                Spacer(modifier = Modifier.height((8 * baseScale).dp))
+
+                // Custom immersive glassmorphic Focus / Break segmented switcher
+                Row(
+                    modifier = Modifier
+                        .glassmorphic(shape = RoundedCornerShape(24.dp), borderWidth = 1.dp, hasShadow = false)
+                        .background(GlassmorphismStyle.getGlassBackgroundColor(), RoundedCornerShape(24.dp))
+                        .border(1.dp, GlassmorphismStyle.getGlassBorderBrush(), RoundedCornerShape(24.dp))
+                        .padding(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    // Focus Option
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(if (!isBreakState) FFColors.orange.copy(alpha = 0.15f) else Color.Transparent)
+                            .clickable { isBreakState = false }
+                            .padding(horizontal = (16 * baseScale).dp, vertical = (8 * baseScale).dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(FFColors.orange, CircleShape)
+                            )
+                            Text(
+                                text = "FOCUS",
+                                color = if (!isBreakState) FFColors.orange else FFColors.textSecondary,
+                                fontSize = (10 * baseScale).sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(4.dp))
+
+                    // Break Option
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(if (isBreakState) Color(0xFF10B981).copy(alpha = 0.15f) else Color.Transparent)
+                            .clickable { isBreakState = true }
+                            .padding(horizontal = (16 * baseScale).dp, vertical = (8 * baseScale).dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(Color(0xFF10B981), CircleShape)
+                            )
+                            Text(
+                                text = "BREAK",
+                                color = if (isBreakState) Color(0xFF10B981) else FFColors.textSecondary,
+                                fontSize = (10 * baseScale).sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            // --- CENTER SECTION: Beautifully Centered Elegant Countdown Timer ---
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.weight(1f),
@@ -271,8 +387,8 @@ fun FocusLauncher(
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(280.dp)
-                        .padding(16.dp)
+                        .size(circularRingSize)
+                        .padding((12 * baseScale).dp)
                         .pointerInput(Unit) {
                             detectTapGestures(
                                 onPress = {
@@ -287,15 +403,15 @@ fun FocusLauncher(
                         }
                 ) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
-                        val strokeWidth = 10.dp.toPx()
+                        val strokeWidth = 3.dp.toPx() // Thinner and more elegant stroke
                         // Secondary track
                         drawCircle(
-                            color = Color(0xFF18181B), // Colors.surface
+                            color = FFColors.borderSubtle.copy(alpha = 0.5f),
                             style = Stroke(width = strokeWidth)
                         )
                         // Active Arc
                         drawArc(
-                            color = Color(0xFFFAFAFA), // Colors.textPrimary
+                            color = arcColor,
                             startAngle = -90f,
                             sweepAngle = animatedProgress * 360f,
                             useCenter = false,
@@ -304,11 +420,11 @@ fun FocusLauncher(
                         // Tactile continuous hold-to-exit indicator
                         if (holdProgress > 0f) {
                             drawArc(
-                                color = Color(0xFFEF4444), // Crimson focus unlock indicator
+                                color = FFColors.red,
                                 startAngle = -90f,
                                 sweepAngle = holdProgress * 360f,
                                 useCenter = false,
-                                style = Stroke(width = strokeWidth * 1.5f, cap = StrokeCap.Round)
+                                style = Stroke(width = strokeWidth * 2f, cap = StrokeCap.Round)
                             )
                         }
                     }
@@ -320,141 +436,111 @@ fun FocusLauncher(
 
                     Text(
                         text = displayTime,
-                        fontSize = 54.sp,
+                        fontSize = displayTimeFontSize,
                         fontWeight = FontWeight.ExtraLight,
-                        color = Color(0xFFFAFAFA),
-                        textAlign = TextAlign.Center
+                        color = FFColors.textPrimary,
+                        textAlign = TextAlign.Center,
+                        letterSpacing = (-1).sp
                     )
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // Live Clock underneath
                 Text(
                     text = currentTime,
-                    fontSize = 14.sp,
-                    color = Color(0xFF71717A), // Colors.textMuted
-                    fontWeight = FontWeight.Light
+                    fontSize = 13.sp,
+                    color = FFColors.textSecondary, // Elegant soft slate muted color
+                    fontWeight = FontWeight.Normal,
+                    letterSpacing = 0.5.sp
                 )
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(28.dp))
 
-                // Timer Controls Row containing distinct Reset, Pause, and Start buttons
+                // Timer Controls Row containing Reset, Pause, and Start buttons styled as ultra-minimalist circles
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth()
+                    horizontalArrangement = Arrangement.Center,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     // 1. Reset Button
-                    Button(
+                    FilledIconButton(
                         onClick = onResetTimer,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF18181B),
-                            contentColor = Color(0xFFFAFAFA)
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = FFColors.surfaceAlt,
+                            contentColor = FFColors.textSecondary
                         ),
                         modifier = Modifier
-                            .height(44.dp)
-                            .weight(1f)
-                            .border(1.dp, Color(0xFF27272A), RoundedCornerShape(12.dp))
+                            .size(44.dp)
+                            .border(1.dp, FFColors.border, CircleShape)
                             .testTag("timer_reset_button")
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "Reset Timer",
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Reset", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Reset Timer",
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
 
+                    Spacer(modifier = Modifier.width(16.dp))
+
                     // 2. Pause Button (Active when timer is running)
-                    Button(
+                    FilledIconButton(
                         onClick = onPause,
                         enabled = isTimerRunning,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF18181B),
-                            contentColor = Color(0xFFFAFAFA),
-                            disabledContainerColor = Color(0xFF0C0C0D),
-                            disabledContentColor = Color(0xFF3F3F46)
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = FFColors.surfaceAlt,
+                            contentColor = FFColors.textPrimary,
+                            disabledContainerColor = FFColors.bg.copy(alpha = 0.5f),
+                            disabledContentColor = FFColors.textDisabled
                         ),
                         modifier = Modifier
-                            .height(44.dp)
-                            .weight(1f)
+                            .size(54.dp)
                             .border(
                                 1.dp,
-                                if (isTimerRunning) Color(0xFF3F3F46) else Color(0xFF18181B),
-                                RoundedCornerShape(12.dp)
+                                if (isTimerRunning) FFColors.border else FFColors.borderSubtle,
+                                CircleShape
                             )
                             .testTag("timer_pause_button")
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Pause,
-                                contentDescription = "Pause Session",
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Pause", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
+                        Icon(
+                            imageVector = Icons.Default.Pause,
+                            contentDescription = "Pause Session",
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
 
+                    Spacer(modifier = Modifier.width(16.dp))
+
                     // 3. Start Button (Active when timer is paused/stopped)
-                    Button(
+                    FilledIconButton(
                         onClick = onResume,
                         enabled = !isTimerRunning,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFFFAFAFA),
-                            contentColor = Color(0xFF09090B),
-                            disabledContainerColor = Color(0xFF18181B),
-                            disabledContentColor = Color(0xFF52525B)
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = arcColor, // Use animated focus/break accent color!
+                            contentColor = if (FFColors.isDark) Color.Black else Color.White,
+                            disabledContainerColor = FFColors.surfaceAlt,
+                            disabledContentColor = FFColors.textDisabled
                         ),
                         modifier = Modifier
-                            .height(44.dp)
-                            .weight(1f)
+                            .size(54.dp)
+                            .border(
+                                1.dp,
+                                if (!isTimerRunning) arcColor else FFColors.borderSubtle,
+                                CircleShape
+                            )
                             .testTag("timer_start_button")
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.PlayArrow,
-                                contentDescription = "Start Session",
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Start", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = "Start Session",
+                            modifier = Modifier.size(22.dp)
+                        )
                     }
                 }
             }
 
-            // --- MIDDLE PANEL: Intention (Subtle & Beautifully Centered Goal, No "INTENTION" Header Label) ---
-            if (goal.isNotBlank()) {
-                Text(
-                    text = goal,
-                    fontSize = 26.sp,
-                    color = Color(0xFFFAFAFA), // Crisp white text
-                    fontWeight = FontWeight.Normal,
-                    textAlign = TextAlign.Center,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 32.dp, vertical = 24.dp)
-                )
-            }
-
-            // --- BOTTOM PANEL: Allowed Companion Apps Icon Row (No Header Label, Empty if none) ---
+            // --- BOTTOM SECTION: Companion Apps & Hold-to-Exit ---
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.fillMaxWidth()
@@ -480,19 +566,24 @@ fun FocusLauncher(
                 }
 
                 if (matchedApps.isNotEmpty()) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 240.dp)
-                            .verticalScroll(rememberScrollState())
-                            .padding(bottom = 16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    Text(
+                        text = "COMPANION APPS",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.2.sp,
+                        color = FFColors.textMuted,
+                        modifier = Modifier.padding(bottom = 10.dp)
+                    )
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        modifier = Modifier.padding(bottom = 20.dp)
                     ) {
-                        matchedApps.forEach { app ->
+                        items(matchedApps) { app ->
                             Box(
-                                contentAlignment = Alignment.Center,
                                 modifier = Modifier
+                                    .glassmorphic(shape = RoundedCornerShape(20.dp), borderWidth = 1.dp, hasShadow = false)
+                                    .border(1.dp, GlassmorphismStyle.getGlassBorderBrush(), RoundedCornerShape(20.dp))
                                     .clickable {
                                         try {
                                             val activity = context.findActivity()
@@ -522,35 +613,46 @@ fun FocusLauncher(
                                             }
                                         }
                                     }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
                             ) {
-                                Text(
-                                    text = app.label,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Medium,
-                                    fontSize = 15.sp,
-                                    color = Color(0xFFE4E4E7),
-                                    letterSpacing = 1.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    AppIconImage(
+                                        packageName = app.packageName,
+                                        modifier = Modifier.size(companionIconSize)
+                                    )
+                                    Text(
+                                        text = app.label,
+                                        fontSize = (11 * baseScale).sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = FFColors.textPrimary
+                                    )
+                                }
                             }
                         }
                     }
                 }
 
-                // A beautiful, highly conspicuous, dedicated Hold-to-Exit bar/button!
-                val holdBorderColor = if (holdProgress > 0f) Color(0xFFEF4444) else Color(0xFF27272A)
-                val holdBgColor = if (holdProgress > 0f) Color(0x1AEF4444) else Color(0xFF18181B)
-                val holdTextColor = if (holdProgress > 0f) Color(0xFFEF4444) else Color(0xFFA1A1AA)
+                // Sleek, ultra-minimalist hold-to-unlock gesture target bar
+                val holdBorderBrush = if (holdProgress > 0f) {
+                    SolidColor(FFColors.red.copy(alpha = holdProgress))
+                } else {
+                    GlassmorphismStyle.getGlassBorderBrush()
+                }
+                val holdBgColor = if (holdProgress > 0f) FFColors.red.copy(alpha = 0.1f * holdProgress) else GlassmorphismStyle.getGlassBackgroundColor()
+                val holdTextColor = if (holdProgress > 0f) FFColors.red else FFColors.textSecondary
 
                 Box(
                     modifier = Modifier
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .padding(horizontal = 32.dp, vertical = 12.dp)
+                        .widthIn(max = 280.dp)
                         .fillMaxWidth()
-                        .height(56.dp)
-                        .background(holdBgColor, RoundedCornerShape(16.dp))
-                        .border(1.dp, holdBorderColor, RoundedCornerShape(16.dp))
+                        .height(44.dp)
+                        .glassmorphic(shape = RoundedCornerShape(22.dp), borderWidth = 1.dp, hasShadow = false)
+                        .background(holdBgColor, RoundedCornerShape(22.dp))
+                        .border(1.dp, holdBorderBrush, RoundedCornerShape(22.dp))
                         .pointerInput(Unit) {
                             detectTapGestures(
                                 onPress = {
@@ -572,48 +674,49 @@ fun FocusLauncher(
                             modifier = Modifier
                                 .fillMaxHeight()
                                 .fillMaxWidth(holdProgress)
-                                .background(Color(0xFFEF4444).copy(alpha = 0.25f), RoundedCornerShape(16.dp))
+                                .background(FFColors.red.copy(alpha = 0.15f), RoundedCornerShape(22.dp))
                         )
                     }
 
                     Row(
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                        modifier = Modifier.fillMaxSize(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.Lock,
                             contentDescription = "Lock icon",
-                            tint = if (holdProgress > 0f) Color(0xFFEF4444) else Color(0xFF71717A),
-                            modifier = Modifier.size(18.dp)
+                            tint = if (holdProgress > 0f) FFColors.red else FFColors.textDisabled,
+                            modifier = Modifier.size(12.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = if (holdProgress > 0f) {
-                                "RELEASING LOCK... ${(holdProgress * 100).toInt()}%"
+                                "RELEASING... ${(holdProgress * 100).toInt()}%"
                             } else {
-                                "PRESS & HOLD TO EXIT SESSION"
+                                "HOLD TO EXIT"
                             },
                             color = holdTextColor,
-                            fontSize = 12.sp,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp
+                            letterSpacing = 1.2.sp
                         )
                     }
                 }
             }
         }
+        } // End of BoxWithConstraints
 
         // --- Bottom Sheet Mock for Swipe/Back press ---
         if (showExitSheet) {
             AlertDialog(
                 onDismissRequest = { showExitSheet = false },
                 modifier = Modifier.testTag("exit_alert_dialog"),
-                containerColor = Color(0xFF18181B), // Colors.surface
+                containerColor = FFColors.surface, // Colors.surface
                 title = {
                     Text(
                         text = "Pause Session?",
-                        color = Color(0xFFFAFAFA),
+                        color = FFColors.textPrimary,
                         fontWeight = FontWeight.Bold,
                         fontSize = 18.sp
                     )
@@ -622,14 +725,14 @@ fun FocusLauncher(
                     Column {
                         Text(
                             text = "Ending the focus session early will log this session as incomplete.",
-                            color = Color(0xFFA1A1AA),
+                            color = FFColors.textSecondary,
                             fontSize = 14.sp
                         )
                         if (isLockRestrictEnabled) {
                             Spacer(modifier = Modifier.height(16.dp))
                             Text(
                                 text = "LOCK RESTRICT MODE ACTIVE\nTo exit, type \"UNPLUG\" below to confirm intentionality.",
-                                color = Color(0xFFF97316), // Orange
+                                color = FFColors.orange, // Orange
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.padding(bottom = 8.dp)
@@ -638,19 +741,19 @@ fun FocusLauncher(
                                 value = challengeInput,
                                 onValueChange = { challengeInput = it },
                                 singleLine = true,
-                                placeholder = { Text("Type UNPLUG here", color = Color(0xFF71717A)) },
+                                placeholder = { Text("Type UNPLUG here", color = FFColors.textDisabled) },
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = Color(0xFFFAFAFA),
-                                    unfocusedTextColor = Color(0xFFFAFAFA),
-                                    focusedBorderColor = Color(0xFFF97316),
-                                    unfocusedBorderColor = Color(0xFF3F3F46)
+                                    focusedTextColor = FFColors.textPrimary,
+                                    unfocusedTextColor = FFColors.textPrimary,
+                                    focusedBorderColor = FFColors.orange,
+                                    unfocusedBorderColor = FFColors.border
                                 )
                             )
                             if (countdownSec > 0) {
                                 Text(
                                     text = "Lock restriction active for another $countdownSec second(s)...",
-                                    color = Color(0xFFEF4444), // Red
+                                    color = FFColors.red, // Red
                                     fontSize = 11.sp,
                                     modifier = Modifier.padding(top = 8.dp)
                                 )
@@ -670,8 +773,8 @@ fun FocusLauncher(
                         },
                         enabled = isChallengePassed,
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFFEF4444),
-                            disabledContainerColor = Color(0x33EF4444)
+                            containerColor = FFColors.red,
+                            disabledContainerColor = FFColors.red.copy(alpha = 0.2f)
                         )
                     ) {
                         val btnText = when {
@@ -680,14 +783,14 @@ fun FocusLauncher(
                             !challengeInput.trim().equals("UNPLUG", ignoreCase = true) -> "Type UNPLUG"
                             else -> "End Session"
                         }
-                        Text(btnText, color = if (isChallengePassed) Color.White else Color(0xFF737373))
+                        Text(btnText, color = if (isChallengePassed) Color.White else FFColors.textDisabled)
                     }
                 },
                 dismissButton = {
                     TextButton(
                         onClick = { showExitSheet = false }
                     ) {
-                        Text("Keep Going", color = Color(0xFFFAFAFA))
+                        Text("Keep Going", color = FFColors.textPrimary)
                     }
                 }
             )

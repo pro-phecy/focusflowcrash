@@ -33,6 +33,8 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
         const val KEY_TIMER_RUNNING = "timer_running"
         const val KEY_TIME_LEFT = "timer_time_left"
         const val KEY_LAST_TICK_TIME = "timer_last_tick_time"
+        const val KEY_PROFILE_NEEDS_SYNC = "profile_needs_sync"
+        const val KEY_TUTORIAL_DONE = "tutorial_done"
     }
 
     // --- AUTH FLOW STATES ---
@@ -103,6 +105,9 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
     private val _isOnboardingCompleted = MutableStateFlow(false)
     val isOnboardingCompleted: StateFlow<Boolean> = _isOnboardingCompleted.asStateFlow()
 
+    private val _isTutorialCompleted = MutableStateFlow(false)
+    val isTutorialCompleted: StateFlow<Boolean> = _isTutorialCompleted.asStateFlow()
+
     // --- ACTIVE FOCUS SESSION LOGIC ---
     private val _activeSession = MutableStateFlow<FocusSessionEntity?>(null)
     val activeSession: StateFlow<FocusSessionEntity?> = _activeSession.asStateFlow()
@@ -137,8 +142,8 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
     private val _prevWeekMinutes = MutableStateFlow(0)
     val prevWeekMinutes: StateFlow<Int> = _prevWeekMinutes.asStateFlow()
 
-    val focusSessions: StateFlow<List<FocusSessionEntity>> = sessionDao.getAllSessionsFlow()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    private val _focusSessions = MutableStateFlow<List<FocusSessionEntity>>(emptyList())
+    val focusSessions: StateFlow<List<FocusSessionEntity>> = _focusSessions.asStateFlow()
 
     private var timerJob: Job? = null
     private var sessionStartWallTime = 0L
@@ -169,6 +174,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                 _user.value = null
                 _isAuthenticated.value = false
                 _isOnboardingCompleted.value = false
+                _isTutorialCompleted.value = false
             }
         }
     }
@@ -180,18 +186,20 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                 // Check if user is logged in locally
                 val loggedInVal = keyValueDao.getValue(KEY_IS_LOGGED_IN)?.value ?: "false"
                 val onboardingVal = keyValueDao.getValue(KEY_ONBOARDING_DONE)?.value ?: "false"
+                val tutorialVal = keyValueDao.getValue(KEY_TUTORIAL_DONE)?.value ?: "false"
                 _isAuthenticated.value = loggedInVal.toBoolean()
                 _isOnboardingCompleted.value = onboardingVal.toBoolean()
+                _isTutorialCompleted.value = tutorialVal.toBoolean()
+
+                val localProfile = profileDao.getProfile()
+                if (localProfile != null) {
+                    _user.value = localProfile
+                    scheduleAllNotifications(localProfile)
+                }
 
                 if (_isAuthenticated.value) {
-                    // Check profile local representation
-                    val localProfile = profileDao.getProfile()
-                    if (localProfile != null) {
-                        _user.value = localProfile
-                        scheduleAllNotifications(localProfile)
-                    }
-                    // Sync latest remote profile (including schedule)
-                    fetchRemoteProfile()
+                    // Sync latest remote profile and retrieve directly from Supabase
+                    syncProfileWithRemote()
                 }
                 refreshAllStats()
                 restoreActiveFocusSession()
@@ -285,7 +293,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                 val result = authRepository.login(emailParam, passwordParam)
                 when (result) {
                     is Result.Success -> {
-                        saveAuthResponse(result.data)
+                        saveAuthResponse(result.data, isNewUser = false)
                     }
                     is Result.Error -> {
                         val errMsg = result.message
@@ -312,7 +320,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                 val result = authRepository.register(emailParam, passwordParam, displayNameParam)
                 when (result) {
                     is Result.Success -> {
-                        saveAuthResponse(result.data)
+                        saveAuthResponse(result.data, isNewUser = true)
                     }
                     is Result.Error -> {
                         val errMsg = result.message
@@ -331,7 +339,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun saveAuthResponse(response: AuthResponse) {
+    private suspend fun saveAuthResponse(response: AuthResponse, isNewUser: Boolean) {
         try {
             val userVal = response.user
             val tokenVal = response.accessToken
@@ -374,12 +382,20 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
             keyValueDao.insertSetting(KeyValueSetting(KEY_IS_LOGGED_IN, "true"))
             keyValueDao.insertSetting(KeyValueSetting(KEY_USER_ID, profile.userId))
 
+            if (!isNewUser) {
+                keyValueDao.insertSetting(KeyValueSetting(KEY_ONBOARDING_DONE, "true"))
+                _isOnboardingCompleted.value = true
+            } else {
+                keyValueDao.insertSetting(KeyValueSetting(KEY_ONBOARDING_DONE, "false"))
+                _isOnboardingCompleted.value = false
+            }
+
             _user.value = profile
             _isAuthenticated.value = true
             apiClient.notifyAuthStateChanged(ApiClient.AuthState.SIGNED_IN, userVal)
             refreshAllStats()
             // Sync latest remote profile (including schedule) upon login
-            fetchRemoteProfile()
+            syncProfileWithRemote()
         } catch (e: Throwable) {
             e.printStackTrace()
             val errMsg = "Database write error during sign in: ${e.localizedMessage ?: "Please try again."}"
@@ -439,6 +455,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
 
                 profileDao.insertProfile(updated)
                 _user.value = updated
+                keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "true"))
 
                 // Sync with remote Supabase database if configured and logged in
                 if (isSupabaseActive() && apiClient.tokenStore.accessToken != null) {
@@ -449,6 +466,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                                 "preferredApps" to appEssentials
                             ))
                         }
+                        keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "false"))
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }
@@ -466,13 +484,36 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun completeTutorial() {
+        viewModelScope.launch {
+            try {
+                keyValueDao.insertSetting(KeyValueSetting(KEY_TUTORIAL_DONE, "true"))
+                _isTutorialCompleted.value = true
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
     // --- PROFILE & SETTINGS CHANGERS ---
     fun updatePreferredApps(apps: List<String>) {
         viewModelScope.launch {
-            val u = _user.value ?: return@launch
+            val u = _user.value ?: UserProfileEntity(
+                userId = java.util.UUID.randomUUID().toString(),
+                displayName = "User",
+                email = "offline@user.com",
+                dailyGoal = 120,
+                preferredAppsJson = "[]",
+                scheduleJson = "[]",
+                notifications = true,
+                darkMode = true,
+                privacyMode = false,
+                photoUrl = null
+            )
             val updated = u.copy(preferredAppsJson = Converters().fromStringList(apps))
             profileDao.insertProfile(updated)
             _user.value = updated
+            keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "true"))
 
             // Sync with remote Supabase database if configured and logged in
             if (isSupabaseActive() && apiClient.tokenStore.accessToken != null) {
@@ -480,6 +521,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                     withContext(Dispatchers.IO) {
                         apiClient.api.updateProfile(mapOf("preferredApps" to apps))
                     }
+                    keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "false"))
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -488,7 +530,18 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun togglePreferredApp(packageName: String) {
-        val u = _user.value ?: return
+        val u = _user.value ?: UserProfileEntity(
+            userId = "",
+            displayName = "User",
+            email = "offline@user.com",
+            dailyGoal = 120,
+            preferredAppsJson = "[]",
+            scheduleJson = "[]",
+            notifications = true,
+            darkMode = true,
+            privacyMode = false,
+            photoUrl = null
+        )
         val currentList = Converters().toStringList(u.preferredAppsJson).toMutableList()
         if (currentList.contains(packageName)) {
             currentList.remove(packageName)
@@ -504,6 +557,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
             val updated = u.copy(dailyGoal = minutes)
             profileDao.insertProfile(updated)
             _user.value = updated
+            keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "true"))
 
             // Sync with remote Supabase database if configured and logged in
             if (isSupabaseActive() && apiClient.tokenStore.accessToken != null) {
@@ -511,6 +565,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                     withContext(Dispatchers.IO) {
                         apiClient.api.updateProfile(mapOf("dailyGoal" to minutes))
                     }
+                    keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "false"))
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -525,6 +580,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
             val updated = u.copy(displayName = name)
             profileDao.insertProfile(updated)
             _user.value = updated
+            keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "true"))
 
             // Sync with remote Supabase database if configured and logged in
             if (isSupabaseActive() && apiClient.tokenStore.accessToken != null) {
@@ -532,6 +588,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                     withContext(Dispatchers.IO) {
                         apiClient.api.updateProfile(mapOf("displayName" to name))
                     }
+                    keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "false"))
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -539,28 +596,80 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun fetchRemoteProfile() {
+    fun syncProfileWithRemote() {
         if (isSupabaseActive() && apiClient.tokenStore.accessToken != null) {
             viewModelScope.launch {
                 try {
-                    val remoteProfile = withContext(Dispatchers.IO) {
-                        apiClient.api.getProfile()
+                    val needsSync = keyValueDao.getValue(KEY_PROFILE_NEEDS_SYNC)?.value == "true"
+                    val local = profileDao.getProfile()
+                    
+                    if (local != null && needsSync) {
+                        try {
+                            withContext(Dispatchers.IO) {
+                                apiClient.api.updateProfile(mapOf(
+                                    "displayName" to local.displayName,
+                                    "dailyGoal" to local.dailyGoal,
+                                    "preferredApps" to Converters().toStringList(local.preferredAppsJson),
+                                    "schedule" to Converters().toScheduleList(local.scheduleJson),
+                                    "notifications" to local.notifications,
+                                    "darkMode" to local.darkMode,
+                                    "privacyMode" to local.privacyMode
+                                ))
+                            }
+                            keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "false"))
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                            // Keep needsSync as true and don't pull from remote to prevent overwriting local changes
+                            return@launch
+                        }
                     }
-                    val currentLocal = profileDao.getProfile()
-                    if (currentLocal != null) {
-                        val updated = currentLocal.copy(
-                            displayName = remoteProfile.displayName ?: currentLocal.displayName,
-                            dailyGoal = remoteProfile.dailyGoal ?: currentLocal.dailyGoal,
+                    
+                    // Now download the latest remote profile
+                    var remoteProfile: UserProfileModel? = null
+                    try {
+                        remoteProfile = withContext(Dispatchers.IO) {
+                            apiClient.api.getProfile()
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        // If fetching fails, the remote profile might not exist.
+                        // Let's try to create/insert it using our local profile!
+                        val local = profileDao.getProfile()
+                        if (local != null) {
+                            try {
+                                remoteProfile = withContext(Dispatchers.IO) {
+                                    apiClient.api.createProfile(mapOf(
+                                        "displayName" to local.displayName,
+                                        "dailyGoal" to local.dailyGoal,
+                                        "preferredApps" to Converters().toStringList(local.preferredAppsJson),
+                                        "schedule" to Converters().toScheduleList(local.scheduleJson),
+                                        "notifications" to local.notifications,
+                                        "darkMode" to local.darkMode,
+                                        "privacyMode" to local.privacyMode
+                                    ))
+                                }
+                            } catch (err: Exception) {
+                                err.printStackTrace()
+                            }
+                        }
+                    }
+
+                    if (remoteProfile != null) {
+                        val profile = UserProfileEntity(
+                            userId = remoteProfile.userId ?: "",
+                            displayName = remoteProfile.displayName ?: "Focus Member",
+                            email = remoteProfile.email ?: "",
+                            dailyGoal = remoteProfile.dailyGoal ?: 120,
                             preferredAppsJson = Converters().fromStringList(remoteProfile.preferredApps ?: emptyList()),
                             scheduleJson = Converters().fromScheduleList(remoteProfile.schedule ?: emptyList()),
-                            notifications = remoteProfile.notifications ?: currentLocal.notifications,
-                            darkMode = remoteProfile.darkMode ?: currentLocal.darkMode,
-                            privacyMode = remoteProfile.privacyMode ?: currentLocal.privacyMode,
-                            photoUrl = remoteProfile.photoUrl ?: currentLocal.photoUrl
+                            notifications = remoteProfile.notifications ?: true,
+                            darkMode = remoteProfile.darkMode ?: true,
+                            privacyMode = remoteProfile.privacyMode ?: false,
+                            photoUrl = remoteProfile.photoUrl
                         )
-                        profileDao.insertProfile(updated)
-                        _user.value = updated
-                        scheduleAllNotifications(updated)
+                        profileDao.insertProfile(profile)
+                        _user.value = profile
+                        scheduleAllNotifications(profile)
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -578,6 +687,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
             val updated = u.copy(scheduleJson = updatedJson)
             profileDao.insertProfile(updated)
             _user.value = updated
+            keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "true"))
 
             // Schedule the notification alarm
             NotificationHelper.scheduleNotification(context, entry)
@@ -595,6 +705,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                     withContext(Dispatchers.IO) {
                         apiClient.api.updateProfile(mapOf("schedule" to list))
                     }
+                    keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "false"))
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -611,6 +722,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
             val updated = u.copy(scheduleJson = updatedJson)
             profileDao.insertProfile(updated)
             _user.value = updated
+            keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "true"))
 
             // Cancel the scheduled notification alarm
             NotificationHelper.cancelScheduledNotification(context, entry)
@@ -628,6 +740,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                     withContext(Dispatchers.IO) {
                         apiClient.api.updateProfile(mapOf("schedule" to list))
                     }
+                    keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "false"))
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -649,6 +762,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
             val updated = u.copy(scheduleJson = updatedJson)
             profileDao.insertProfile(updated)
             _user.value = updated
+            keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "true"))
 
             // Cancel the old and schedule the new notification alarm
             NotificationHelper.cancelScheduledNotification(context, oldEntry)
@@ -667,6 +781,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                     withContext(Dispatchers.IO) {
                         apiClient.api.updateProfile(mapOf("schedule" to list))
                     }
+                    keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "false"))
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -684,6 +799,18 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
             )
             profileDao.insertProfile(updated)
             _user.value = updated
+            keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "true"))
+
+            // Broadcast notification state change to resetting the companion web client
+            try {
+                if (notifs) {
+                    FocusWebServer.broadcastEvent("enable_notifications")
+                } else {
+                    FocusWebServer.broadcastEvent("disable_notifications")
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
 
             // Sync with remote Supabase database if configured and logged in
             if (isSupabaseActive() && apiClient.tokenStore.accessToken != null) {
@@ -695,6 +822,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                             "privacyMode" to privacy
                         ))
                     }
+                    keyValueDao.insertSetting(KeyValueSetting(KEY_PROFILE_NEEDS_SYNC, "false"))
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -787,7 +915,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
             // Schedule background AlarmManager to wake up and notify when timer hits zero
             NotificationHelper.scheduleSessionEndAlarm(context, totalSeconds)
 
-            FocusWebServer.broadcastEvent("start", sessionEntity.goal)
+            FocusWebServer.broadcastEvent("start", sessionEntity.goal, totalSeconds)
 
             if (_user.value?.notifications != false) {
                 NotificationHelper.sendNotification(
@@ -991,7 +1119,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                 // Reschedule background completion alarm with remaining seconds
                 NotificationHelper.scheduleSessionEndAlarm(context, _timeLeft.value)
 
-                FocusWebServer.broadcastEvent("resume", _activeSession.value?.goal ?: "")
+                FocusWebServer.broadcastEvent("resume", _activeSession.value?.goal ?: "", _timeLeft.value)
             }
 
             sessionStartWallTime = System.currentTimeMillis()
@@ -1075,19 +1203,37 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }.distinctBy { it.packageName }.sortedBy { it.label.lowercase() }
 
-            _installedPackages.value = apps
+            val finalApps = if (apps.isEmpty()) {
+                AppLibrary.ALL_APPS.map { appDef ->
+                    AppInfo(
+                        packageName = appDef.androidPackage,
+                        activityName = "",
+                        label = appDef.name,
+                        customLabel = "",
+                        isHidden = false,
+                        isFavorite = false
+                    )
+                }
+            } else {
+                apps
+            }
+
+            _installedPackages.value = finalApps
         }
     }
 
     fun refreshAllStats() {
+        syncProfileWithRemote()
         viewModelScope.launch {
+            var activeSessionsList: List<FocusSessionEntity> = emptyList()
+
             // 1. Sync local sessions with Supabase if online (bi-directional synchronization)
             if (isSupabaseActive() && apiClient.tokenStore.accessToken != null) {
                 try {
-                    withContext(Dispatchers.IO) {
+                    val remoteSessions = withContext(Dispatchers.IO) {
                         val localSessions = sessionDao.getAllSessions()
-                        val remoteSessions = apiClient.api.getSessions()
-                        val remoteMap = remoteSessions.associateBy { it.id }
+                        val initialRemote = apiClient.api.getSessions()
+                        val remoteMap = initialRemote.associateBy { it.id }
 
                         localSessions.forEach { local ->
                             val remote = remoteMap[local.id]
@@ -1121,7 +1267,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                                     e.printStackTrace()
                                 }
                             } else if (remote.completed && !local.completed) {
-                                // Sync remote completion status to local Room
+                                // Sync remote completion status to local Room (storing/syncing)
                                 sessionDao.insertSession(
                                     local.copy(
                                         completed = true,
@@ -1131,8 +1277,11 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
 
-                        // Sync completely missing remote sessions down to local database
-                        remoteSessions.forEach { remote ->
+                        // Re-fetch clean list of remote sessions as the absolute source of truth
+                        val cleanRemote = apiClient.api.getSessions()
+
+                        // Sync completely missing remote sessions down to local database (cache only)
+                        cleanRemote.forEach { remote ->
                             val local = sessionDao.getSessionById(remote.id)
                             if (local == null) {
                                 sessionDao.insertSession(
@@ -1149,16 +1298,40 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                                 )
                             }
                         }
+                        cleanRemote
+                    }
+
+                    // Convert remote models to entities for UI
+                    activeSessionsList = remoteSessions.map { remote ->
+                        FocusSessionEntity(
+                            id = remote.id,
+                            userId = remote.userId,
+                            startedAt = remote.startedAt,
+                            duration = remote.duration,
+                            goal = remote.goal,
+                            allowedAppsJson = Converters().fromStringList(remote.allowedApps),
+                            completed = remote.completed,
+                            endedAt = remote.endedAt
+                        )
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
             }
 
-            // 2. Compute stats locally (using the synced / offline-first focus sessions!)
-            withContext(Dispatchers.IO) {
+            // Fallback to local storage only if offline/not authenticated, otherwise retrieve purely from Supabase
+            if (activeSessionsList.isEmpty()) {
+                activeSessionsList = withContext(Dispatchers.IO) {
+                    sessionDao.getAllSessions()
+                }
+            }
+
+            // Expose the retrieved list to the UI StateFlow (without reading local DB flow)
+            _focusSessions.value = activeSessionsList
+
+            // 2. Compute stats locally using the retrieved sessions list (direct memory calculation, not retrieving from Room)
+            withContext(Dispatchers.Default) {
                 try {
-                    val localSessions = sessionDao.getAllSessions()
                     val calendar = Calendar.getInstance()
                     val sdf = SimpleDateFormat("EEE", Locale.US)
                     val dateSdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
@@ -1206,7 +1379,7 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
 
                     val taskMinutesMap = mutableMapOf<String, Int>()
 
-                    localSessions.forEach { ses ->
+                    activeSessionsList.forEach { ses ->
                         if (ses.completed) {
                             countCompleted++
                             val durationMinutes = ses.duration / 60
@@ -1246,18 +1419,65 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }.sortedByDescending { it.minutes }
 
-                    // Compute simple streak
-                    var streak = 0
-                    for (i in 0..30) {
-                        val c = Calendar.getInstance()
-                        c.add(Calendar.DAY_OF_YEAR, -i)
-                        val dateStr = dateSdf.format(c.time)
-                        val minutesForDay = dailyMap[dateStr]?.second ?: 0
-                        if (minutesForDay > 0) {
-                            streak++
-                        } else {
-                            if (i > 0) break // break if missed day unless it is today and they haven't focused yet
+                    // Build a complete map of focus minutes for all historical sessions
+                    val allSessionsMinutesByDate = mutableMapOf<String, Int>()
+                    activeSessionsList.forEach { ses ->
+                        if (ses.completed) {
+                            val durationMinutes = ses.duration / 60
+                            try {
+                                val formattedDateStr = ses.startedAt.substringBefore("T")
+                                allSessionsMinutesByDate[formattedDateStr] = (allSessionsMinutesByDate[formattedDateStr] ?: 0) + durationMinutes
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
                         }
+                    }
+
+                    // Compute true streak based on consecutive days meeting the daily focus goal
+                    val dailyGoalMinutes = _user.value?.dailyGoal ?: 120
+                    var streak = 0
+
+                    val todayCalendar = Calendar.getInstance()
+                    val todayStr = dateSdf.format(todayCalendar.time)
+                    val todayMinutes = allSessionsMinutesByDate[todayStr] ?: 0
+                    val todayMet = todayMinutes >= dailyGoalMinutes
+
+                    val yesterdayCalendar = Calendar.getInstance()
+                    yesterdayCalendar.add(Calendar.DAY_OF_YEAR, -1)
+                    val yesterdayStr = dateSdf.format(yesterdayCalendar.time)
+                    val yesterdayMinutes = allSessionsMinutesByDate[yesterdayStr] ?: 0
+                    val yesterdayMet = yesterdayMinutes >= dailyGoalMinutes
+
+                    if (todayMet) {
+                        var i = 0
+                        while (true) {
+                            val c = Calendar.getInstance()
+                            c.add(Calendar.DAY_OF_YEAR, -i)
+                            val dStr = dateSdf.format(c.time)
+                            val mins = allSessionsMinutesByDate[dStr] ?: 0
+                            if (mins >= dailyGoalMinutes) {
+                                streak++
+                                i++
+                            } else {
+                                break
+                            }
+                        }
+                    } else if (yesterdayMet) {
+                        var i = 1
+                        while (true) {
+                            val c = Calendar.getInstance()
+                            c.add(Calendar.DAY_OF_YEAR, -i)
+                            val dStr = dateSdf.format(c.time)
+                            val mins = allSessionsMinutesByDate[dStr] ?: 0
+                            if (mins >= dailyGoalMinutes) {
+                                streak++
+                                i++
+                            } else {
+                                break
+                            }
+                        }
+                    } else {
+                        streak = 0
                     }
 
                     _prevWeekMinutes.value = prevWeekMinTotal

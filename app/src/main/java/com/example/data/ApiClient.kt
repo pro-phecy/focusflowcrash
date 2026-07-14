@@ -150,6 +150,9 @@ interface FocusFlowApi {
     @GET("profile")
     suspend fun getProfile(): UserProfileModel
 
+    @POST("profile")
+    suspend fun createProfile(@Body profile: Map<String, Any?>): UserProfileModel
+
     @PATCH("profile")
     suspend fun updateProfile(@Body profile: Map<String, Any?>): UserProfileModel
 
@@ -188,7 +191,7 @@ class TokenStore(context: Context) {
         }
         set(value) {
             val v = if (value.isNullOrEmpty()) null else value
-            prefs.edit().putString(ANON_KEY, v).apply()
+            prefs.edit().putString(ANON_KEY, v).commit()
         }
 
     var accessToken: String?
@@ -198,7 +201,7 @@ class TokenStore(context: Context) {
         }
         set(value) {
             val v = if (value.isNullOrEmpty()) null else value
-            prefs.edit().putString(ACCESS_TOKEN, v).apply()
+            prefs.edit().putString(ACCESS_TOKEN, v).commit()
         }
 
     var refreshToken: String?
@@ -208,22 +211,31 @@ class TokenStore(context: Context) {
         }
         set(value) {
             val v = if (value.isNullOrEmpty()) null else value
-            prefs.edit().putString(REFRESH_TOKEN, v).apply()
+            prefs.edit().putString(REFRESH_TOKEN, v).commit()
         }
 
     var baseUrl: String
         get() {
             val sbUrl = BuildConfigFieldReader.getFieldString("SUPABASE_URL")
             val isSbUrlValid = sbUrl.isNotEmpty() && sbUrl.startsWith("https://") && !sbUrl.contains("YOUR_SUPABASE")
-            val defaultUrl = if (isSbUrlValid) sbUrl else "https://focusflow-rn.onrender.com/"
             
+            if (isSbUrlValid) {
+                // If the stored URL contains onrender or is empty/default, we reset it
+                val stored = prefs.getString(BASE_URL_KEY, null)
+                if (stored == null || stored.contains("onrender.com") || stored.contains("10.0.2.2")) {
+                    prefs.edit().remove(BASE_URL_KEY).commit()
+                }
+                return if (sbUrl.endsWith("/")) sbUrl else "$sbUrl/"
+            }
+            
+            val defaultUrl = "https://focusflow-rn.onrender.com/"
             val stored = prefs.getString(BASE_URL_KEY, defaultUrl) ?: defaultUrl
             val cleanStored = if (stored.isEmpty() || stored == "/" || (!stored.startsWith("http://") && !stored.startsWith("https://"))) {
                 defaultUrl
             } else {
                 stored
             }
-            val rawUrl = if (cleanStored == "http://10.0.2.2:4000/") {
+            val rawUrl = if (cleanStored == "http://10.0.2.2:4000/" || cleanStored.contains("onrender.com")) {
                 defaultUrl
             } else {
                 cleanStored
@@ -233,15 +245,15 @@ class TokenStore(context: Context) {
         set(value) {
             val trimmed = value.trim()
             if (trimmed.isEmpty() || trimmed == "/" || (!trimmed.startsWith("http://") && !trimmed.startsWith("https://"))) {
-                prefs.edit().remove(BASE_URL_KEY).apply()
+                prefs.edit().remove(BASE_URL_KEY).commit()
             } else {
                 val formatted = if (trimmed.endsWith("/")) trimmed else "$trimmed/"
-                prefs.edit().putString(BASE_URL_KEY, formatted).apply()
+                prefs.edit().putString(BASE_URL_KEY, formatted).commit()
             }
         }
 
     fun clear() {
-        prefs.edit().remove(ACCESS_TOKEN).remove(REFRESH_TOKEN).apply()
+        prefs.edit().remove(ACCESS_TOKEN).remove(REFRESH_TOKEN).commit()
     }
 }
 
@@ -385,7 +397,13 @@ class ApiClient private constructor(private val context: Context) {
         return try {
             val parts = token.split(".")
             if (parts.size >= 2) {
-                val payloadDecoded = android.util.Base64.decode(parts[1], android.util.Base64.DEFAULT).toString(Charsets.UTF_8)
+                val payload = parts[1]
+                val decodedBytes = try {
+                    android.util.Base64.decode(payload, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
+                } catch (e: Exception) {
+                    android.util.Base64.decode(payload, android.util.Base64.DEFAULT)
+                }
+                val payloadDecoded = decodedBytes.toString(Charsets.UTF_8)
                 val regex = """"sub"\s*:\s*"([^"]+)"""".toRegex()
                 regex.find(payloadDecoded)?.groupValues?.get(1)
             } else null
@@ -532,9 +550,41 @@ class ApiClient private constructor(private val context: Context) {
                 path == "profile" -> {
                     newUrlBuilder.encodedPath("/rest/v1/profile")
                     
+                    val accessToken = tokenStore.accessToken
+                    if (accessToken != null) {
+                        val userId = extractUserIdFromToken(accessToken)
+                        if (userId != null) {
+                            newUrlBuilder.addQueryParameter("user_id", "eq.$userId")
+                        }
+                    }
+                    
                     if (method == "GET") {
                         builder.header("Accept", "application/vnd.pgrst.object+json")
                         builder.url(newUrlBuilder.build())
+                    } else if (method == "POST") {
+                        builder.header("Prefer", "return=representation,resolution=merge-duplicates")
+                        builder.header("Accept", "application/vnd.pgrst.object+json")
+                        builder.url(newUrlBuilder.build())
+                        
+                        val buffer = okio.Buffer()
+                        originalRequest.body?.writeTo(buffer)
+                        val bodyString = buffer.readUtf8()
+                        val rawMap = jsonToMap(bodyString)
+                        if (rawMap != null) {
+                            val mutMap = rawMap.toMutableMap()
+                            val accessToken = tokenStore.accessToken
+                            if (accessToken != null) {
+                                val userId = extractUserIdFromToken(accessToken)
+                                if (userId != null) {
+                                    mutMap["user_id"] = userId
+                                }
+                            }
+                            val sbSnakeMap = mapKeysToSnake(mutMap)
+                            builder.post(okhttp3.RequestBody.create(
+                                "application/json; charset=utf-8".toMediaTypeOrNull(),
+                                mapToJson(sbSnakeMap)
+                            ))
+                        }
                     } else if (method == "PATCH") {
                         builder.header("Prefer", "return=representation")
                         builder.header("Accept", "application/vnd.pgrst.object+json")

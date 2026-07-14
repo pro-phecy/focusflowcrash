@@ -17,11 +17,12 @@ import java.util.TimeZone
 
 class ScheduleReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val action = intent.action
-        if (action == "com.example.SESSION_TIMER_COMPLETE") {
-            val scope = CoroutineScope(Dispatchers.IO)
-            scope.launch {
-                try {
+        val action = intent.action ?: return
+        val pendingResult = goAsync()
+        val scope = CoroutineScope(Dispatchers.IO)
+        scope.launch {
+            try {
+                if (action == "com.example.SESSION_TIMER_COMPLETE") {
                     val db = AppDatabase.getDatabase(context.applicationContext)
                     val profile = db.userProfileDao().getProfile()
                     val notificationsEnabled = profile?.notifications != false
@@ -57,15 +58,8 @@ class ScheduleReceiver : BroadcastReceiver() {
                     db.keyValueDao().insertSetting(KeyValueSetting("active_session_id", ""))
                     db.keyValueDao().insertSetting(KeyValueSetting("timer_running", "false"))
                     db.keyValueDao().insertSetting(KeyValueSetting("timer_time_left", "0"))
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-        } else if (action == Intent.ACTION_BOOT_COMPLETED || action == "android.intent.action.QUICKBOOT_POWERON" || action == "com.htc.intent.action.QUICKBOOT_POWERON") {
-            // Re-schedule all stored focus blocks after boot
-            val scope = CoroutineScope(Dispatchers.IO)
-            scope.launch {
-                try {
+                } else if (action == Intent.ACTION_BOOT_COMPLETED || action == "android.intent.action.QUICKBOOT_POWERON" || action == "com.htc.intent.action.QUICKBOOT_POWERON") {
+                    // Re-schedule all stored focus blocks after boot
                     val db = AppDatabase.getDatabase(context.applicationContext)
                     val profile = db.userProfileDao().getProfile()
                     if (profile != null) {
@@ -75,27 +69,40 @@ class ScheduleReceiver : BroadcastReceiver() {
                             NotificationHelper.scheduleNotification(context.applicationContext, entry)
                         }
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                } else if (action == "com.example.FOCUS_ALARM") {
+                    // Triggered Alarm
+                    val day = intent.getStringExtra("day")
+                    val startTime = intent.getStringExtra("startTime")
+                    val endTime = intent.getStringExtra("endTime")
+                    val task = intent.getStringExtra("task") ?: "Deep Work"
+                    
+                    val db = AppDatabase.getDatabase(context.applicationContext)
+                    val profile = db.userProfileDao().getProfile()
+                    val notificationsEnabled = profile?.notifications != false
+
+                    if (notificationsEnabled) {
+                        val displayDay = day ?: "Today"
+                        val displayStart = startTime ?: "now"
+                        
+                        // Send system notification
+                        NotificationHelper.sendNotification(
+                            context,
+                            "Focus Reminder: $task",
+                            "It's time for your planned '$task' focus session ($displayDay at $displayStart)!"
+                        )
+                    }
+                    
+                    if (day != null && startTime != null && endTime != null) {
+                        // Schedule the next weekly occurrence for this specific block
+                        val entry = ScheduleEntry(day, startTime, endTime, task)
+                        NotificationHelper.scheduleNotification(context.applicationContext, entry)
+                    }
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                pendingResult.finish()
             }
-        } else {
-            // Triggered Alarm
-            val day = intent.getStringExtra("day") ?: return
-            val startTime = intent.getStringExtra("startTime") ?: return
-            val endTime = intent.getStringExtra("endTime") ?: return
-            val task = intent.getStringExtra("task") ?: "Deep Work"
-            
-            // Send system notification
-            NotificationHelper.sendNotification(
-                context,
-                "Time for $task!",
-                "Your scheduled '$task' session is starting from $startTime to $endTime ($day)."
-            )
-            
-            // Schedule the next weekly occurrence for this specific block
-            val entry = ScheduleEntry(day, startTime, endTime, task)
-            NotificationHelper.scheduleNotification(context.applicationContext, entry)
         }
     }
 }

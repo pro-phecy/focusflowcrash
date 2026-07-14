@@ -5,6 +5,8 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.Manifest
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
@@ -15,6 +17,8 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -27,6 +31,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.composed
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.Brush
@@ -45,6 +51,7 @@ import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.viewinterop.AndroidView
 import android.widget.ImageView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,17 +72,17 @@ import androidx.compose.runtime.setValue
 object FFColors {
     var isDark by mutableStateOf(true)
 
-    val bg get() = if (isDark) Color(0xFF09090B) else Color(0xFFFAFAFA)
-    val surface get() = if (isDark) Color(0xFF18181B) else Color(0xFFFFFFFF)
-    val surfaceAlt get() = if (isDark) Color(0xFF27272A) else Color(0xFFF4F4F5)
-    val border get() = if (isDark) Color(0xFF3F3F46) else Color(0xFFE4E4E7)
-    val borderSubtle get() = if (isDark) Color(0xFF27272A) else Color(0xFFF4F4F5)
-    val textPrimary get() = if (isDark) Color(0xFFFAFAFA) else Color(0xFF09090B)
-    val textSecondary get() = if (isDark) Color(0xFFA1A1AA) else Color(0xFF71717A)
-    val textMuted get() = if (isDark) Color(0xFF71717A) else Color(0xFFA1A1AA)
-    val textDisabled get() = if (isDark) Color(0xFF52525B) else Color(0xFFD4D4D8)
+    var bg by mutableStateOf(Color(0xFF09090B))
+    var surface by mutableStateOf(Color(0xFF18181B))
+    var surfaceAlt by mutableStateOf(Color(0xFF27272A))
+    var border by mutableStateOf(Color(0xFF3F3F46))
+    var borderSubtle by mutableStateOf(Color(0xFF27272A))
+    var textPrimary by mutableStateOf(Color(0xFFFAFAFA))
+    var textSecondary by mutableStateOf(Color(0xFFA1A1AA))
+    var textMuted by mutableStateOf(Color(0xFF71717A))
+    var textDisabled by mutableStateOf(Color(0xFF52525B))
     val orange = Color(0xFFF97316)
-    val orangeBg get() = if (isDark) Color(0x1FF97316) else Color(0x1AF97316)
+    var orangeBg by mutableStateOf(Color(0x1FF97316))
     val blue = Color(0xFF3B82F6)
     val green = Color(0xFF22C55E)
     val red = Color(0xFFEF4444)
@@ -87,7 +94,7 @@ enum class FocusTab {
 }
 
 enum class MainAppScreen {
-    LOGIN, ONBOARDING, FOCUS_LAUNCHER, MAIN_SCAFFOLD
+    LOGIN, ONBOARDING, FOCUS_LAUNCHER, MAIN_SCAFFOLD, HISTORY_LOG
 }
 
 @OptIn(ExperimentalAnimationApi::class, ExperimentalMaterial3Api::class)
@@ -106,9 +113,18 @@ fun LauncherScreen(
     val activeSession by viewModel.activeSession.collectAsStateWithLifecycle()
     val timeLeft by viewModel.timeLeft.collectAsStateWithLifecycle()
     val isTimerRunning by viewModel.isTimerRunning.collectAsStateWithLifecycle()
+    val isTutorialCompleted by viewModel.isTutorialCompleted.collectAsStateWithLifecycle()
 
     var currentTab by remember { mutableStateOf(FocusTab.HOME) }
     var showHistoryLog by remember { mutableStateOf(false) }
+    
+    val tourState = remember { GuidedTourState() }
+
+    LaunchedEffect(isAuthenticated, isOnboardingCompleted, isTutorialCompleted) {
+        if (isAuthenticated && isOnboardingCompleted && !isTutorialCompleted) {
+            tourState.activeStep = 0
+        }
+    }
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -134,41 +150,66 @@ fun LauncherScreen(
     // Dynamic color reactivity linkage
     FFColors.isDark = user?.darkMode ?: true
 
+    // Set up animators for color values to ensure a smooth, premium transition
+    val targetBg = if (FFColors.isDark) Color(0xFF09090B) else Color(0xFFFAFAFA)
+    val targetSurface = if (FFColors.isDark) Color(0xFF18181B) else Color(0xFFFFFFFF)
+    val targetSurfaceAlt = if (FFColors.isDark) Color(0xFF27272A) else Color(0xFFF4F4F5)
+    val targetBorder = if (FFColors.isDark) Color(0xFF3F3F46) else Color(0xFFE4E4E7)
+    val targetBorderSubtle = if (FFColors.isDark) Color(0xFF27272A) else Color(0xFFF4F4F5)
+    val targetTextPrimary = if (FFColors.isDark) Color(0xFFFAFAFA) else Color(0xFF09090B)
+    val targetTextSecondary = if (FFColors.isDark) Color(0xFFA1A1AA) else Color(0xFF71717A)
+    val targetTextMuted = if (FFColors.isDark) Color(0xFF71717A) else Color(0xFFA1A1AA)
+    val targetTextDisabled = if (FFColors.isDark) Color(0xFF52525B) else Color(0xFFD4D4D8)
+    val targetOrangeBg = if (FFColors.isDark) Color(0x1FF97316) else Color(0x1AF97316)
+
+    val colorAnimDuration = 600
+    val animBg by animateColorAsState(targetBg, tween(colorAnimDuration, easing = EaseInOutCubic), label = "animBg")
+    val animSurface by animateColorAsState(targetSurface, tween(colorAnimDuration, easing = EaseInOutCubic), label = "animSurface")
+    val animSurfaceAlt by animateColorAsState(targetSurfaceAlt, tween(colorAnimDuration, easing = EaseInOutCubic), label = "animSurfaceAlt")
+    val animBorder by animateColorAsState(targetBorder, tween(colorAnimDuration, easing = EaseInOutCubic), label = "animBorder")
+    val animBorderSubtle by animateColorAsState(targetBorderSubtle, tween(colorAnimDuration, easing = EaseInOutCubic), label = "animBorderSubtle")
+    val animTextPrimary by animateColorAsState(targetTextPrimary, tween(colorAnimDuration, easing = EaseInOutCubic), label = "animTextPrimary")
+    val animTextSecondary by animateColorAsState(targetTextSecondary, tween(colorAnimDuration, easing = EaseInOutCubic), label = "animTextSecondary")
+    val animTextMuted by animateColorAsState(targetTextMuted, tween(colorAnimDuration, easing = EaseInOutCubic), label = "animTextMuted")
+    val animTextDisabled by animateColorAsState(targetTextDisabled, tween(colorAnimDuration, easing = EaseInOutCubic), label = "animTextDisabled")
+    val animOrangeBg by animateColorAsState(targetOrangeBg, tween(colorAnimDuration, easing = EaseInOutCubic), label = "animOrangeBg")
+
+    SideEffect {
+        FFColors.bg = animBg
+        FFColors.surface = animSurface
+        FFColors.surfaceAlt = animSurfaceAlt
+        FFColors.border = animBorder
+        FFColors.borderSubtle = animBorderSubtle
+        FFColors.textPrimary = animTextPrimary
+        FFColors.textSecondary = animTextSecondary
+        FFColors.textMuted = animTextMuted
+        FFColors.textDisabled = animTextDisabled
+        FFColors.orangeBg = animOrangeBg
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(FFColors.bg)
     ) {
         val currentScreen = when {
-            !isOnboardingCompleted -> MainAppScreen.ONBOARDING
             !isAuthenticated -> MainAppScreen.LOGIN
+            !isOnboardingCompleted -> MainAppScreen.ONBOARDING
             activeSession != null -> MainAppScreen.FOCUS_LAUNCHER
+            showHistoryLog -> MainAppScreen.HISTORY_LOG
             else -> MainAppScreen.MAIN_SCAFFOLD
         }
 
         AnimatedContent(
             targetState = currentScreen,
             transitionSpec = {
-                if (targetState == MainAppScreen.FOCUS_LAUNCHER) {
-                    // Zoom/Scale and slide up transition when launching focus mode (extremely premium!)
-                    (fadeIn(animationSpec = tween(600, easing = EaseOutQuart)) + 
-                     scaleIn(initialScale = 0.92f, animationSpec = tween(600, easing = EaseOutQuart)) + 
-                     slideInVertically(initialOffsetY = { it / 6 }, animationSpec = tween(600, easing = EaseOutQuart)))
-                        .togetherWith(fadeOut(animationSpec = tween(450, easing = EaseInQuart)) + 
-                                     scaleOut(targetScale = 0.96f, animationSpec = tween(450, easing = EaseInQuart)))
-                } else if (initialState == MainAppScreen.FOCUS_LAUNCHER) {
-                    // Premium zoom-out fade when leaving focus mode
-                    (fadeIn(animationSpec = tween(500, easing = EaseOutQuart)) + 
-                     scaleIn(initialScale = 1.04f, animationSpec = tween(500, easing = EaseOutQuart)))
-                        .togetherWith(fadeOut(animationSpec = tween(500, easing = EaseInQuart)) + 
-                                     scaleOut(targetScale = 0.95f, animationSpec = tween(500, easing = EaseInQuart)) +
-                                     slideOutOfContainer(towards = AnimatedContentTransitionScope.SlideDirection.Down, animationSpec = tween(500, easing = EaseInQuart)))
-                } else {
-                    // Standard premium slide/fade between regular auth / onboarding / main screens
-                    (fadeIn(animationSpec = tween(450, easing = EaseInOutQuart)) + 
-                     scaleIn(initialScale = 0.98f, animationSpec = tween(450, easing = EaseInOutQuart)))
-                        .togetherWith(fadeOut(animationSpec = tween(300, easing = EaseInOutQuart)))
-                }
+                // Unified subtle premium fade-in + slide-up transition for all primary screen navigation
+                (fadeIn(animationSpec = tween(450, easing = EaseOutQuart)) + 
+                 slideInVertically(initialOffsetY = { 40 }, animationSpec = tween(450, easing = EaseOutQuart)))
+                    .togetherWith(
+                        fadeOut(animationSpec = tween(350, easing = EaseInQuart)) +
+                        slideOutVertically(targetOffsetY = { -40 }, animationSpec = tween(350, easing = EaseInQuart))
+                    )
             },
             label = "MainAppScreenTransition",
             modifier = Modifier.fillMaxSize()
@@ -256,18 +297,13 @@ fun LauncherScreen(
                             AnimatedContent(
                                 targetState = currentTab,
                                 transitionSpec = {
-                                    val direction = if (initialState.ordinal < targetState.ordinal) {
-                                        AnimatedContentTransitionScope.SlideDirection.Left
-                                    } else {
-                                        AnimatedContentTransitionScope.SlideDirection.Right
-                                    }
-                                    slideIntoContainer(
-                                        towards = direction,
-                                        animationSpec = tween(400, easing = EaseOutQuart)
-                                    ) togetherWith slideOutOfContainer(
-                                        towards = direction,
-                                        animationSpec = tween(400, easing = EaseOutQuart)
-                                    )
+                                    // Premium subtle fade-in + slide-up transition for bottom tab switching
+                                    (fadeIn(animationSpec = tween(350, easing = EaseOutQuart)) + 
+                                     slideInVertically(initialOffsetY = { 20 }, animationSpec = tween(350, easing = EaseOutQuart)))
+                                        .togetherWith(
+                                            fadeOut(animationSpec = tween(250, easing = EaseInQuart)) +
+                                            slideOutVertically(targetOffsetY = { -20 }, animationSpec = tween(250, easing = EaseInQuart))
+                                        )
                                 },
                                 label = "TabTransition",
                                 modifier = Modifier.fillMaxSize()
@@ -276,14 +312,32 @@ fun LauncherScreen(
                                     FocusTab.HOME -> HomeScreen(
                                         viewModel = viewModel,
                                         onStartFocusClick = { currentTab = FocusTab.TIMER },
-                                        onOpenHistoryClick = { showHistoryLog = true }
+                                        onOpenHistoryClick = { showHistoryLog = true },
+                                        onReplayTutorial = { tourState.activeStep = 0 },
+                                        activeTutorialStep = tourState.activeStep,
+                                        tourState = tourState
                                     )
-                                    FocusTab.TIMER -> TimerScreen(viewModel = viewModel)
-                                    FocusTab.PROFILE -> ProfileScreen(viewModel = viewModel)
+                                    FocusTab.TIMER -> TimerScreen(
+                                        viewModel = viewModel,
+                                        activeTutorialStep = tourState.activeStep,
+                                        tourState = tourState
+                                    )
+                                    FocusTab.PROFILE -> ProfileScreen(
+                                         viewModel = viewModel,
+                                         onReplayTutorial = { tourState.activeStep = 0 },
+                                         activeTutorialStep = tourState.activeStep,
+                                         tourState = tourState
+                                     )
                                 }
                             }
                         }
                     }
+                }
+                MainAppScreen.HISTORY_LOG -> {
+                    FocusSessionHistoryScreen(
+                        viewModel = viewModel,
+                        onBack = { showHistoryLog = false }
+                    )
                 }
             }
         }
@@ -305,18 +359,28 @@ fun LauncherScreen(
             }
         }
 
+        if (tourState.activeStep != null && isAuthenticated && isOnboardingCompleted) {
+            GuidedTourOverlay(
+                tourState = tourState,
+                onStepChanged = { /* state handled internally */ },
+                onDismiss = {
+                    viewModel.completeTutorial()
+                    tourState.activeStep = null
+                },
+                currentTab = currentTab,
+                onTabChange = { currentTab = it },
+                onOpenAppDrawer = {},
+                onOpenGoalSettings = {},
+                onOpenHistory = { showHistoryLog = true }
+            )
+        }
+
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .safeDrawingPadding()
                 .padding(bottom = 16.dp)
-        )
-
-        FocusSessionHistorySidebar(
-            viewModel = viewModel,
-            isOpen = showHistoryLog,
-            onClose = { showHistoryLog = false }
         )
     }
 }
@@ -476,7 +540,7 @@ fun LoginScreen(viewModel: FocusViewModel) {
                     )
                     
                     Text(
-                        text = if (isSignUpMode) "Create an account for cloud synced statistics" else "Deep work and scheduled concentration management",
+                        text = if (isSignUpMode) "Create your focus profile to begin" else "Deep work and scheduled concentration management",
                         fontSize = 13.sp,
                         color = FFColors.textSecondary,
                         textAlign = TextAlign.Center,
@@ -1086,11 +1150,13 @@ fun OnboardingDailyGoal(minutes: Int, onMinutesChange: (Int) -> Unit) {
                         .fillMaxWidth()
                         .padding(24.dp)
                 ) {
-                    IconButton(
-                        onClick = { if (minutes > 15) onMinutesChange(minutes - 15) },
+                    Box(
+                        contentAlignment = Alignment.Center,
                         modifier = Modifier
                             .size(44.dp)
-                            .background(FFColors.surfaceAlt, CircleShape)
+                            .clip(CircleShape)
+                            .background(FFColors.surfaceAlt)
+                            .clickable { if (minutes > 15) onMinutesChange(minutes - 15) }
                     ) {
                         Icon(Icons.Default.Remove, contentDescription = "Decrement goal", tint = FFColors.textPrimary)
                     }
@@ -1103,11 +1169,13 @@ fun OnboardingDailyGoal(minutes: Int, onMinutesChange: (Int) -> Unit) {
                         modifier = Modifier.padding(horizontal = 16.dp)
                     )
 
-                    IconButton(
-                        onClick = { if (minutes < 960) onMinutesChange(minutes + 15) },
+                    Box(
+                        contentAlignment = Alignment.Center,
                         modifier = Modifier
                             .size(44.dp)
-                            .background(FFColors.surfaceAlt, CircleShape)
+                            .clip(CircleShape)
+                            .background(FFColors.surfaceAlt)
+                            .clickable { if (minutes < 960) onMinutesChange(minutes + 15) }
                     ) {
                         Icon(Icons.Default.Add, contentDescription = "Increment goal", tint = FFColors.textPrimary)
                     }
@@ -1430,7 +1498,10 @@ fun OnboardingDone(onFinish: () -> Unit) {
 fun HomeScreen(
     viewModel: FocusViewModel,
     onStartFocusClick: () -> Unit,
-    onOpenHistoryClick: () -> Unit
+    onOpenHistoryClick: () -> Unit,
+    onReplayTutorial: () -> Unit,
+    activeTutorialStep: Int? = null,
+    tourState: GuidedTourState? = null
 ) {
     val user by viewModel.user.collectAsStateWithLifecycle()
     val stats by viewModel.stats.collectAsStateWithLifecycle()
@@ -1475,14 +1546,6 @@ fun HomeScreen(
 
     val configuration = androidx.compose.ui.platform.LocalConfiguration.current
     val screenWidth = configuration.screenWidthDp.dp
-    val screenHeight = configuration.screenHeightDp.dp
-
-    // Decimals of screen dimensions for responsive sizing
-    val responsiveHSpacing = (screenWidth.value * 0.06f).coerceIn(16f, 32f).dp
-    val responsiveVSpacing = (screenHeight.value * 0.035f).coerceIn(20f, 36f).dp
-    val smallSpacer = (screenHeight.value * 0.015f).coerceIn(8f, 20f).dp
-    val mediumSpacer = (screenHeight.value * 0.026f).coerceIn(16f, 28f).dp
-    val largeSpacer = (screenHeight.value * 0.042f).coerceIn(28f, 54f).dp
 
     // Dynamic text scale factors based on screen width - beautifully tuned to be elegant, readable, and cohesive
     val baseScale = (screenWidth.value / 360f).coerceIn(0.85f, 1.25f)
@@ -1493,12 +1556,22 @@ fun HomeScreen(
     val bodyFontSize = (13 * baseScale).sp
     val buttonFontSize = (15 * baseScale).sp
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Transparent),
         contentAlignment = Alignment.TopCenter
     ) {
+        val parentWidth = maxWidth
+        val parentHeight = maxHeight
+
+        // Relative percentages of the parent container dimensions rather than fixed pixel values
+        val responsiveHSpacing = (parentWidth * 0.055f).coerceIn(16.dp, 28.dp)
+        val responsiveVSpacing = (parentHeight * 0.035f).coerceIn(20.dp, 36.dp)
+        val smallSpacer = (parentHeight * 0.015f).coerceIn(8.dp, 16.dp)
+        val mediumSpacer = (parentHeight * 0.026f).coerceIn(16.dp, 24.dp)
+        val largeSpacer = (parentHeight * 0.042f).coerceIn(28.dp, 44.dp)
+
         Column(
             modifier = Modifier
                 .widthIn(max = 600.dp)
@@ -1534,29 +1607,34 @@ fun HomeScreen(
                         )
                     }
 
-                    // Elegant card button to view focus history log
-                    Button(
-                        onClick = onOpenHistoryClick,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = FFColors.surface,
-                            contentColor = FFColors.orange
-                        ),
-                        border = BorderStroke(1.dp, FFColors.borderSubtle),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.testTag("view_history_logs_button")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.History,
-                                contentDescription = "Focus History Log",
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                "Log History",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                        // Elegant card button to view focus history log
+                        Button(
+                            onClick = onOpenHistoryClick,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = FFColors.surface,
+                                contentColor = FFColors.orange
+                            ),
+                            border = BorderStroke(1.dp, FFColors.borderSubtle),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("view_history_logs_button")
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.History,
+                                    contentDescription = "Focus History Log",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    "Log History",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
@@ -1596,14 +1674,20 @@ fun HomeScreen(
             AnimatedEntrance(delayMillis = 250) {
                 if (favoriteApps.isNotEmpty()) {
                     Column {
-                        Text(
-                            text = "FAVORITE APPS",
-                            fontSize = sectionHeaderFontSize,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.5.sp,
-                            color = FFColors.textMuted,
-                            modifier = Modifier.padding(top = smallSpacer, bottom = smallSpacer)
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Start,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "FAVORITE APPS",
+                                fontSize = sectionHeaderFontSize,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.5.sp,
+                                color = FFColors.textMuted,
+                                modifier = Modifier.padding(top = smallSpacer, bottom = smallSpacer)
+                            )
+                        }
 
                         Column(
                             modifier = Modifier
@@ -1611,53 +1695,56 @@ fun HomeScreen(
                                 .padding(bottom = mediumSpacer),
                             verticalArrangement = Arrangement.spacedBy(smallSpacer)
                         ) {
-                            val rows = favoriteApps.chunked(4)
-                            rows.forEach { rowApps ->
+                            // Render favorite apps
+                            val totalItems = favoriteApps.size
+                            val columnsCount = 4
+                            val rowsCount = (totalItems + columnsCount - 1) / columnsCount
+
+                            for (rowIndex in 0 until rowsCount) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(smallSpacer)
                                 ) {
-                                    rowApps.forEach { app ->
-                                        Column(
-                                            horizontalAlignment = Alignment.CenterHorizontally,
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .clip(RoundedCornerShape(16.dp))
-                                                .clickable {
-                                                    try {
-                                                        app.launch(context)
-                                                    } catch (e: Exception) {
-                                                        Toast.makeText(context, "Failed to launch ${app.label}", Toast.LENGTH_SHORT).show()
-                                                    }
-                                                }
-                                                .padding(smallSpacer / 2)
-                                        ) {
-                                            Box(
+                                    for (colIndex in 0 until columnsCount) {
+                                        val itemIndex = rowIndex * columnsCount + colIndex
+                                        if (itemIndex < favoriteApps.size) {
+                                            val app = favoriteApps[itemIndex]
+                                            Column(
+                                                horizontalAlignment = Alignment.CenterHorizontally,
                                                 modifier = Modifier
-                                                    .size((56 * baseScale).coerceIn(48f, 72f).dp)
-                                                    .background(FFColors.surface, CircleShape),
-                                                contentAlignment = Alignment.Center
+                                                    .weight(1f)
+                                                    .clip(RoundedCornerShape(16.dp))
+                                                    .clickable {
+                                                        try {
+                                                            app.launch(context)
+                                                        } catch (e: Exception) {
+                                                            Toast.makeText(context, "Failed to launch ${app.label}", Toast.LENGTH_SHORT).show()
+                                                        }
+                                                    }
+                                                    .padding(smallSpacer / 2)
                                             ) {
-                                                AppIconImage(
-                                                    packageName = app.packageName, 
-                                                    modifier = Modifier.size((32 * baseScale).coerceIn(24f, 48f).dp)
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size((56 * baseScale).coerceIn(48f, 72f).dp)
+                                                        .background(FFColors.surface, CircleShape),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    AppIconImage(
+                                                        packageName = app.packageName, 
+                                                        modifier = Modifier.size((32 * baseScale).coerceIn(24f, 48f).dp)
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.height(smallSpacer / 2))
+                                                Text(
+                                                    text = app.label,
+                                                    fontSize = (13 * baseScale).sp,
+                                                    color = FFColors.textPrimary,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    textAlign = TextAlign.Center
                                                 )
                                             }
-                                            Spacer(modifier = Modifier.height(smallSpacer / 2))
-                                            Text(
-                                                text = app.label,
-                                                fontSize = (13 * baseScale).sp,
-                                                color = FFColors.textPrimary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                textAlign = TextAlign.Center
-                                            )
-                                        }
-                                    }
-                                    // Add filler spaces to keep layout items equal width
-                                    val fillers = 4 - rowApps.size
-                                    if (fillers > 0) {
-                                        repeat(fillers) {
+                                        } else {
                                             Spacer(modifier = Modifier.weight(1f))
                                         }
                                     }
@@ -1699,6 +1786,42 @@ fun HomeScreen(
                 }
             }
 
+            Spacer(modifier = Modifier.height(smallSpacer))
+
+            // Open App Drawer Button
+            AnimatedEntrance(delayMillis = 300) {
+                Button(
+                    onClick = { showAppDrawer = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height((68 * baseScale).coerceIn(56f, 84f).dp)
+                        .testTag("open_app_drawer_button")
+                        .tourHighlight(step = 3, tourState = tourState, isActive = activeTutorialStep == 3, shape = RoundedCornerShape(20.dp)),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = FFColors.surface,
+                        contentColor = FFColors.textPrimary
+                    ),
+                    shape = RoundedCornerShape(20.dp),
+                    border = BorderStroke(1.dp, FFColors.borderSubtle)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Menu,
+                            contentDescription = "Drawer",
+                            tint = FFColors.textSecondary,
+                            modifier = Modifier.size((24 * baseScale).dp)
+                        )
+                        Spacer(modifier = Modifier.width(smallSpacer))
+                        Text("All Apps & Tools Drawer", fontWeight = FontWeight.SemiBold, fontSize = (16 * baseScale).sp)
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(mediumSpacer))
+
             // Today's Focus Card Progress Block
             AnimatedEntrance(delayMillis = 350) {
                 DailyGoalProgressCard(
@@ -1711,7 +1834,9 @@ fun HomeScreen(
                     smallSpacer = smallSpacer,
                     mediumSpacer = mediumSpacer,
                     onOpenSettings = { showGoalSettingsPanel = true },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .tourHighlight(step = 1, tourState = tourState, isActive = activeTutorialStep == 1, shape = RoundedCornerShape(32.dp))
                 )
             }
 
@@ -1782,44 +1907,31 @@ fun HomeScreen(
                     modifier = Modifier.weight(1f, fill = false)
                 ) {
                     Text(
-                        text = "CONCENTRATION HISTORIC",
-                        fontSize = sectionHeaderFontSize,
+                        text = "CONCENTRATION HISTORY",
+                        fontSize = (11 * baseScale).sp,
                         color = FFColors.textSecondary,
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.5.sp
+                        letterSpacing = 1.2.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    IconButton(
-                        onClick = onOpenHistoryClick,
+                    Box(
+                        contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .size(28.dp)
-                            .background(FFColors.surface, CircleShape)
+                            .size((28 * baseScale).dp)
+                            .clip(CircleShape)
+                            .background(FFColors.surface)
+                            .clickable { onOpenHistoryClick() }
                             .testTag("concentration_historic_log_icon")
                     ) {
                         Icon(
                             imageVector = Icons.Default.History,
                             contentDescription = "View complete history logs",
                             tint = FFColors.orange,
-                            modifier = Modifier.size(14.dp)
+                            modifier = Modifier.size((14 * baseScale).dp)
                         )
                     }
-                }
-
-                Spacer(modifier = Modifier.width(16.dp))
-
-                // Streak Pill
-                Box(
-                    modifier = Modifier
-                        .background(Color(0xFF321E14), RoundedCornerShape(999.dp)) // subtle dark orange
-                        .padding(horizontal = (16 * baseScale).dp, vertical = (8 * baseScale).dp)
-                ) {
-                    Text(
-                        text = "🔥 ${stats.streak} DAY STREAK",
-                        color = FFColors.orange,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = (12 * baseScale).sp,
-                        letterSpacing = 1.sp
-                    )
                 }
             }
         }
@@ -1865,38 +1977,7 @@ fun HomeScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(largeSpacer))
 
-        // Open App Drawer Button
-        AnimatedEntrance(delayMillis = 950) {
-            Button(
-                onClick = { showAppDrawer = true },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height((68 * baseScale).coerceIn(56f, 84f).dp)
-                    .testTag("open_app_drawer_button"),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = FFColors.surface,
-                    contentColor = FFColors.textPrimary
-                ),
-                shape = RoundedCornerShape(20.dp),
-                border = BorderStroke(1.dp, FFColors.borderSubtle)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Menu,
-                        contentDescription = "Drawer",
-                        tint = FFColors.textSecondary,
-                        modifier = Modifier.size((24 * baseScale).dp)
-                    )
-                    Spacer(modifier = Modifier.width(smallSpacer))
-                    Text("All Apps & Tools Drawer", fontWeight = FontWeight.SemiBold, fontSize = (16 * baseScale).sp)
-                }
-            }
-        }
 
         Spacer(modifier = Modifier.height(largeSpacer * 2.5f)) // Avoid overlaps
     }
@@ -2203,7 +2284,11 @@ fun WeeklyComparisonCard(
 // ==========================================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TimerScreen(viewModel: FocusViewModel) {
+fun TimerScreen(
+    viewModel: FocusViewModel,
+    activeTutorialStep: Int? = null,
+    tourState: GuidedTourState? = null
+) {
     val context = LocalContext.current
     var intentionText by remember { mutableStateOf("") }
     var durationHrs by remember { mutableStateOf(0) }
@@ -2260,7 +2345,9 @@ fun TimerScreen(viewModel: FocusViewModel) {
         // Card 1: Hour/Min/Sec Column Selector
         AnimatedEntrance(delayMillis = 150) {
             GlassmorphicCard(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .tourHighlight(step = 2, tourState = tourState, isActive = activeTutorialStep == 2, shape = RoundedCornerShape(32.dp)),
                 shape = RoundedCornerShape(32.dp)
             ) {
                 Column(modifier = Modifier.padding(responsiveHSpacing), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -2273,42 +2360,17 @@ fun TimerScreen(viewModel: FocusViewModel) {
                         modifier = Modifier.padding(bottom = smallSpacer)
                     )
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Hours column
-                        DurationPickerColumn(
-                            value = durationHrs,
-                            onValueChange = { durationHrs = it },
-                            onIncrement = { if (durationHrs < 23) durationHrs += 1 else durationHrs = 0 },
-                            onDecrement = { if (durationHrs > 0) durationHrs -= 1 else durationHrs = 23 },
-                            maxValue = 23
-                        )
-
-                        Text(":", fontSize = (36 * baseScale).sp, style = TextStyle(color = FFColors.textSecondary), modifier = Modifier.padding(horizontal = (8 * baseScale).dp))
-
-                        // Minutes column
-                        DurationPickerColumn(
-                            value = durationMins,
-                            onValueChange = { durationMins = it },
-                            onIncrement = { if (durationMins < 59) durationMins += 1 else durationMins = 0 },
-                            onDecrement = { if (durationMins > 0) durationMins -= 1 else durationMins = 59 },
-                            maxValue = 59
-                        )
-
-                        Text(":", fontSize = (36 * baseScale).sp, style = TextStyle(color = FFColors.textSecondary), modifier = Modifier.padding(horizontal = (8 * baseScale).dp))
-
-                        // Seconds column
-                        DurationPickerColumn(
-                            value = durationSecs,
-                            onValueChange = { durationSecs = it },
-                            onIncrement = { if (durationSecs < 59) durationSecs += 1 else durationSecs = 0 },
-                            onDecrement = { if (durationSecs > 0) durationSecs -= 1 else durationSecs = 59 },
-                            maxValue = 59
-                        )
-                    }
+                    WheelDurationPicker(
+                        durationHrs = durationHrs,
+                        durationMins = durationMins,
+                        durationSecs = durationSecs,
+                        onDurationChanged = { h, m, s ->
+                            durationHrs = h
+                            durationMins = m
+                            durationSecs = s
+                        },
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
                 }
             }
         }
@@ -2764,7 +2826,12 @@ fun DurationPickerColumn(
 // 5. PROFILE SCREEN WORKSPACE
 // ==========================================
 @Composable
-fun ProfileScreen(viewModel: FocusViewModel) {
+fun ProfileScreen(
+    viewModel: FocusViewModel,
+    onReplayTutorial: () -> Unit,
+    activeTutorialStep: Int? = null,
+    tourState: GuidedTourState? = null
+) {
     val user by viewModel.user.collectAsStateWithLifecycle()
     val stats by viewModel.stats.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -2779,8 +2846,10 @@ fun ProfileScreen(viewModel: FocusViewModel) {
                 "Push Notifications Enabled",
                 "You will now receive alerts, session logs, and daily focus reminders!"
             )
+            viewModel.updateSettings(true, user?.darkMode ?: true, user?.privacyMode ?: false)
         } else {
             Toast.makeText(context, "Notification permission denied.", Toast.LENGTH_SHORT).show()
+            viewModel.updateSettings(false, user?.darkMode ?: true, user?.privacyMode ?: false)
         }
     }
 
@@ -2792,6 +2861,9 @@ fun ProfileScreen(viewModel: FocusViewModel) {
 
     var showScheduleModal by remember { mutableStateOf(false) }
     var editingSchedule by remember { mutableStateOf<ScheduleEntry?>(null) }
+
+    var selectedDayFilter by remember { mutableStateOf("All") }
+    var selectedTaskFilter by remember { mutableStateOf("All") }
 
     val configuration = androidx.compose.ui.platform.LocalConfiguration.current
     val screenWidth = configuration.screenWidthDp.dp
@@ -2909,9 +2981,6 @@ fun ProfileScreen(viewModel: FocusViewModel) {
 
             // --- WEEKLY SCHEDULES CARD ---
             AnimatedEntrance(delayMillis = 250) {
-                var selectedDayFilter by remember { mutableStateOf("All") }
-                var selectedTaskFilter by remember { mutableStateOf("All") }
-
                 val scheduleList = remember(user?.scheduleJson) {
                     Converters().toScheduleList(user?.scheduleJson)
                 }
@@ -2976,7 +3045,7 @@ fun ProfileScreen(viewModel: FocusViewModel) {
 
                         // --- WEEKLY INTERACTIVE TIMELINE OVERVIEW ---
                         Text(
-                            text = "WEEK AT A GLANCE (CLICK DAY TO FILTER)",
+                            text = "WEEKLY REMINDERS (CLICK DAY TO FILTER)",
                             fontSize = schedSectionHeaderSize,
                             fontWeight = FontWeight.Bold,
                             color = FFColors.textMuted,
@@ -2996,9 +3065,7 @@ fun ProfileScreen(viewModel: FocusViewModel) {
                         ) {
                             weekdays.forEach { dayName ->
                                 val dayBlocks = scheduleList.filter { it.day.equals(dayName, ignoreCase = true) }
-                                val totalMin = dayBlocks.sumOf { 
-                                    (timeToMinutes(it.endTime) - timeToMinutes(it.startTime)).coerceAtLeast(0)
-                                }
+                                val reminderCount = dayBlocks.size
                                 val isSelectedDay = selectedDayFilter.equals(dayName, ignoreCase = true)
                                 
                                 Row(
@@ -3023,7 +3090,7 @@ fun ProfileScreen(viewModel: FocusViewModel) {
 
                                     Spacer(modifier = Modifier.width(8.dp))
 
-                                    // Interactive Proportional Bar
+                                    // Interactive Proportional Bar with Reminder Dots
                                     BoxWithConstraints(
                                         modifier = Modifier
                                             .weight(1f)
@@ -3035,39 +3102,32 @@ fun ProfileScreen(viewModel: FocusViewModel) {
                                         
                                         dayBlocks.forEach { block ->
                                             val startMin = timeToMinutes(block.startTime)
-                                            val endMin = timeToMinutes(block.endTime)
-                                            val duration = (endMin - startMin).coerceAtLeast(30)
-                                            
                                             val startPercent = startMin.toFloat() / 1440f
-                                            val widthPercent = duration.toFloat() / 1440f
                                             val color = getTaskColor(block.task)
                                             
-                                            val blockWidthDp = with(density) { (widthPercent * widthPx).toDp() }
                                             val blockOffsetDp = with(density) { (startPercent * widthPx).toDp() }
                                             
                                             Box(
                                                 modifier = Modifier
-                                                    .height(schedTimelineBarHeight)
-                                                    .width(blockWidthDp)
-                                                    .offset(x = blockOffsetDp)
-                                                    .background(color, RoundedCornerShape(4.dp))
+                                                    .size(6.dp)
+                                                    .offset(x = (blockOffsetDp - 3.dp).coerceAtLeast(0.dp))
+                                                    .align(Alignment.CenterStart)
+                                                    .background(color, CircleShape)
                                             )
                                         }
                                     }
 
                                     Spacer(modifier = Modifier.width(8.dp))
 
-                                    // Total Focus Hours Text
+                                    // Total Reminders Count Text
                                     Text(
-                                        text = if (totalMin > 0) {
-                                            val h = totalMin / 60
-                                            val m = totalMin % 60
-                                            if (h > 0) "${h}h" else "${m}m"
+                                        text = if (reminderCount > 0) {
+                                            if (reminderCount == 1) "1 reminder" else "$reminderCount reminders"
                                         } else "—",
-                                        fontSize = schedTotalHoursSize,
+                                        fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (totalMin > 0) FFColors.textPrimary else FFColors.textDisabled,
-                                        modifier = Modifier.width(32.dp),
+                                        color = if (reminderCount > 0) FFColors.textPrimary else FFColors.textDisabled,
+                                        modifier = Modifier.width(90.dp),
                                         textAlign = androidx.compose.ui.text.style.TextAlign.End
                                     )
                                 }
@@ -3078,7 +3138,7 @@ fun ProfileScreen(viewModel: FocusViewModel) {
 
                         // --- DOUBLE TIER FILTER CHIPS ---
                         Text(
-                            text = "FILTER SCHEDULE STATE",
+                            text = "FILTER REMINDERS",
                             fontSize = schedSectionHeaderSize,
                             fontWeight = FontWeight.Bold,
                             color = FFColors.textMuted,
@@ -3199,7 +3259,7 @@ fun ProfileScreen(viewModel: FocusViewModel) {
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Text(
-                                    text = "No focus blocks match current state filter.",
+                                    text = "No focus reminders match current state filter.",
                                     color = FFColors.textDisabled,
                                     fontSize = schedTotalHoursSize,
                                     textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -3268,7 +3328,7 @@ fun ProfileScreen(viewModel: FocusViewModel) {
                                                         fontSize = schedItemSubSize
                                                     )
                                                     Text(
-                                                        text = "${schedule.startTime} - ${schedule.endTime}",
+                                                        text = schedule.startTime,
                                                         color = FFColors.textSecondary,
                                                         fontSize = schedItemSubSize
                                                     )
@@ -3279,12 +3339,15 @@ fun ProfileScreen(viewModel: FocusViewModel) {
                                         Spacer(modifier = Modifier.width(8.dp))
 
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            IconButton(
-                                                onClick = {
-                                                    editingSchedule = schedule
-                                                    showScheduleModal = true
-                                                },
-                                                modifier = Modifier.size(schedActionIconBoxSize)
+                                            Box(
+                                                contentAlignment = Alignment.Center,
+                                                modifier = Modifier
+                                                    .size(schedActionIconBoxSize)
+                                                    .clip(CircleShape)
+                                                    .clickable {
+                                                        editingSchedule = schedule
+                                                        showScheduleModal = true
+                                                    }
                                             ) {
                                                 Icon(
                                                     imageVector = Icons.Default.Edit,
@@ -3294,9 +3357,12 @@ fun ProfileScreen(viewModel: FocusViewModel) {
                                                 )
                                             }
                                             Spacer(modifier = Modifier.width(2.dp))
-                                            IconButton(
-                                                onClick = { viewModel.deleteScheduleBlock(schedule) },
-                                                modifier = Modifier.size(schedActionIconBoxSize)
+                                            Box(
+                                                contentAlignment = Alignment.Center,
+                                                modifier = Modifier
+                                                    .size(schedActionIconBoxSize)
+                                                    .clip(CircleShape)
+                                                    .clickable { viewModel.deleteScheduleBlock(schedule) }
                                             ) {
                                                 Icon(
                                                     imageVector = Icons.Default.Delete,
@@ -3319,7 +3385,9 @@ fun ProfileScreen(viewModel: FocusViewModel) {
             // --- SETTINGS TOGGLES CARD ---
             AnimatedEntrance(delayMillis = 350) {
                 GlassmorphicCard(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .tourHighlight(step = 4, tourState = tourState, isActive = activeTutorialStep == 4, shape = RoundedCornerShape(32.dp)),
                     shape = RoundedCornerShape(32.dp)
                 ) {
                     Column(modifier = Modifier.padding(responsiveHSpacing)) {
@@ -3337,87 +3405,56 @@ fun ProfileScreen(viewModel: FocusViewModel) {
                         val darkChecked = user?.darkMode ?: true
                         val privChecked = user?.privacyMode ?: false
 
+                        val isPermissionGranted = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                            ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.POST_NOTIFICATIONS
+                            ) == PackageManager.PERMISSION_GRANTED
+                        } else {
+                            true
+                        }
+
                         SettingRowToggle(
                             icon = Icons.Default.Notifications,
                             label = "Push Notifications",
-                            checked = notifyChecked,
+                            checked = notifyChecked && isPermissionGranted,
                             onCheckedChange = { isChecked ->
                                 if (isChecked) {
                                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                                        permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                        if (isPermissionGranted) {
+                                            viewModel.updateSettings(true, darkChecked, privChecked)
+                                        } else {
+                                            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                        }
                                     } else {
+                                        viewModel.updateSettings(true, darkChecked, privChecked)
                                         NotificationHelper.sendNotification(
                                             context,
                                             "Push Notifications Enabled",
                                             "You will now receive alerts, session logs, and daily focus reminders!"
                                         )
                                     }
+                                } else {
+                                    viewModel.updateSettings(false, darkChecked, privChecked)
                                 }
-                                viewModel.updateSettings(isChecked, darkChecked, privChecked)
                             }
                         )
 
                         SettingRowToggle(
-                            icon = Icons.Default.DarkMode,
-                            label = "System Dark Mode",
-                            checked = darkChecked,
-                            onCheckedChange = { viewModel.updateSettings(notifyChecked, it, privChecked) }
+                            icon = if (!darkChecked) Icons.Default.Contrast else Icons.Default.DarkMode,
+                            label = "High-Contrast View",
+                            checked = !darkChecked,
+                            onCheckedChange = { isHighContrast ->
+                                viewModel.updateSettings(notifyChecked && isPermissionGranted, !isHighContrast, privChecked)
+                            }
                         )
 
                         SettingRowToggle(
                             icon = Icons.Default.Lock,
                             label = "Lock restrict mode",
                             checked = privChecked,
-                            onCheckedChange = { viewModel.updateSettings(notifyChecked, darkChecked, it) }
+                            onCheckedChange = { viewModel.updateSettings(notifyChecked && isPermissionGranted, darkChecked, it) }
                         )
-
-                        Divider(
-                            color = FFColors.borderSubtle,
-                            thickness = 1.dp,
-                            modifier = Modifier.padding(vertical = 16.dp)
-                        )
-
-                        Text(
-                            text = "BROWSER NOTIFICATIONS",
-                            fontSize = (10 * baseScale).sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.3.sp,
-                            color = FFColors.textMuted,
-                            modifier = Modifier.padding(bottom = 12.dp)
-                        )
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(FFColors.surfaceAlt, RoundedCornerShape(16.dp))
-                                .padding(16.dp),
-                            verticalAlignment = Alignment.Top
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Laptop,
-                                contentDescription = "Browser Companion",
-                                tint = FFColors.blue,
-                                modifier = Modifier
-                                    .size(24.dp)
-                                    .padding(top = 2.dp)
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column {
-                                Text(
-                                    text = "Desktop Browser Alerts",
-                                    fontSize = 14.sp,
-                                    color = FFColors.textPrimary,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "To receive real-time alerts on your computer screen when a session starts, completes, pauses, or cancels:\n\n1. Open http://localhost:8082 in your computer's browser.\n2. Click 'Enable Browser Notifications'.\n3. Keep that tab open to listen to your session in real time.",
-                                    fontSize = 12.sp,
-                                    color = FFColors.textSecondary,
-                                    lineHeight = 18.sp
-                                )
-                            }
-                        }
                     }
                 }
             }
@@ -3582,14 +3619,11 @@ fun ProfileScreen(viewModel: FocusViewModel) {
     // Focus Schedule ADD/EDIT Modal
     if (showScheduleModal) {
         val isEditing = editingSchedule != null
-        val initialDay = editingSchedule?.day ?: "Monday"
+        val initialDay = editingSchedule?.day ?: if (selectedDayFilter != "All") selectedDayFilter else "Monday"
         val initialTask = editingSchedule?.task ?: "Deep Work"
 
         val startParsed = remember(editingSchedule) {
             parseTimeString(editingSchedule?.startTime ?: "09:00 AM")
-        }
-        val endParsed = remember(editingSchedule) {
-            parseTimeString(editingSchedule?.endTime ?: "05:00 PM")
         }
 
         var selectedDay by remember(editingSchedule) { mutableStateOf(initialDay) }
@@ -3599,44 +3633,6 @@ fun ProfileScreen(viewModel: FocusViewModel) {
         var startMinute by remember(editingSchedule) { mutableStateOf(startParsed.second) }
         var startAmPm by remember(editingSchedule) { mutableStateOf(if (startParsed.third) "PM" else "AM") }
 
-        var endHour by remember(editingSchedule) { mutableStateOf(endParsed.first) }
-        var endMinute by remember(editingSchedule) { mutableStateOf(endParsed.second) }
-        var endAmPm by remember(editingSchedule) { mutableStateOf(if (endParsed.third) "PM" else "AM") }
-
-        // State-Based Real-time Overlap Conflict Checker
-        val conflictBlock = remember(selectedDay, startHour, startMinute, startAmPm, endHour, endMinute, endAmPm, user?.scheduleJson) {
-            val list = Converters().toScheduleList(user?.scheduleJson)
-            val finalStartH = startHour.padStart(2, '0').ifEmpty { "12" }
-            val finalStartM = startMinute.padStart(2, '0').ifEmpty { "00" }
-            val finalEndH = endHour.padStart(2, '0').ifEmpty { "12" }
-            val finalEndM = endMinute.padStart(2, '0').ifEmpty { "00" }
-            
-            val startMin = timeToMinutes("$finalStartH:$finalStartM $startAmPm")
-            val endMin = timeToMinutes("$finalEndH:$finalEndM $endAmPm")
-            
-            if (startMin >= endMin || startHour.isEmpty() || endHour.isEmpty()) {
-                null
-            } else {
-                list.find { block ->
-                    // Skip checking self in edit mode
-                    val isCurrentEditing = isEditing && 
-                                           editingSchedule?.day == block.day && 
-                                           editingSchedule?.startTime == block.startTime && 
-                                           editingSchedule?.endTime == block.endTime
-                    
-                    if (isCurrentEditing) {
-                        false
-                    } else {
-                        block.day.equals(selectedDay, ignoreCase = true) && {
-                            val bStart = timeToMinutes(block.startTime)
-                            val bEnd = timeToMinutes(block.endTime)
-                            startMin < bEnd && endMin > bStart
-                        }()
-                    }
-                }
-            }
-        }
-
         AlertDialog(
             onDismissRequest = {
                 showScheduleModal = false
@@ -3645,7 +3641,7 @@ fun ProfileScreen(viewModel: FocusViewModel) {
             containerColor = FFColors.surface,
             title = {
                 Text(
-                    text = if (isEditing) "Edit Focus Block" else "Schedule Focus Block",
+                    text = if (isEditing) "Edit Focus Reminder" else "Set Focus Reminder",
                     color = FFColors.textPrimary,
                     fontWeight = FontWeight.Bold
                 )
@@ -3761,213 +3757,18 @@ fun ProfileScreen(viewModel: FocusViewModel) {
 
                     Spacer(modifier = Modifier.height(18.dp))
 
-                    Text("START TIME", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = FFColors.textMuted, letterSpacing = 1.2.sp)
+                    Text("REMINDER TIME", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = FFColors.textMuted, letterSpacing = 1.2.sp)
                     Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = startHour,
-                            onValueChange = { newVal ->
-                                val clean = newVal.filter { it.isDigit() }.take(2)
-                                if (clean.isEmpty()) {
-                                    startHour = ""
-                                } else {
-                                    val num = clean.toIntOrNull() ?: 12
-                                    if (num in 1..12) {
-                                        startHour = clean
-                                    }
-                                }
-                            },
-                            placeholder = { Text("09", color = FFColors.textDisabled) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = FFColors.orange,
-                                unfocusedBorderColor = FFColors.borderSubtle,
-                                focusedTextColor = FFColors.textPrimary,
-                                unfocusedTextColor = FFColors.textPrimary
-                            ),
-                            singleLine = true,
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.width(60.dp)
-                        )
-
-                        Text(":", color = FFColors.textPrimary, fontWeight = FontWeight.Bold)
-
-                        OutlinedTextField(
-                            value = startMinute,
-                            onValueChange = { newVal ->
-                                val clean = newVal.filter { it.isDigit() }.take(2)
-                                if (clean.isEmpty()) {
-                                    startMinute = ""
-                                } else {
-                                    val num = clean.toIntOrNull() ?: 0
-                                    if (num in 0..59) {
-                                        startMinute = clean
-                                    }
-                                }
-                            },
-                            placeholder = { Text("00", color = FFColors.textDisabled) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = FFColors.orange,
-                                unfocusedBorderColor = FFColors.borderSubtle,
-                                focusedTextColor = FFColors.textPrimary,
-                                unfocusedTextColor = FFColors.textPrimary
-                            ),
-                            singleLine = true,
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.width(60.dp)
-                        )
-
-                        Spacer(modifier = Modifier.width(4.dp))
-
-                        // Segmented AM/PM Row
-                        Row(
-                            modifier = Modifier
-                                .background(FFColors.surfaceAlt, RoundedCornerShape(8.dp))
-                                .padding(2.dp)
-                        ) {
-                            listOf("AM", "PM").forEach { opt ->
-                                val active = opt == startAmPm
-                                Box(
-                                    modifier = Modifier
-                                        .background(
-                                            color = if (active) FFColors.orange else Color.Transparent,
-                                            shape = RoundedCornerShape(6.dp)
-                                        )
-                                        .clickable { startAmPm = opt }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                                ) {
-                                    Text(
-                                        text = opt,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (active) Color.White else FFColors.textSecondary
-                                    )
-                                }
-                            }
+                    WheelTimePicker(
+                        selectedHour = startHour,
+                        selectedMinute = startMinute,
+                        selectedAmPm = startAmPm,
+                        onTimeChanged = { h, m, ap ->
+                            startHour = h
+                            startMinute = m
+                            startAmPm = ap
                         }
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Text("END TIME", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = FFColors.textMuted, letterSpacing = 1.2.sp)
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = endHour,
-                            onValueChange = { newVal ->
-                                val clean = newVal.filter { it.isDigit() }.take(2)
-                                if (clean.isEmpty()) {
-                                    endHour = ""
-                                } else {
-                                    val num = clean.toIntOrNull() ?: 5
-                                    if (num in 1..12) {
-                                        endHour = clean
-                                    }
-                                }
-                            },
-                            placeholder = { Text("05", color = FFColors.textDisabled) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = FFColors.orange,
-                                unfocusedBorderColor = FFColors.borderSubtle,
-                                focusedTextColor = FFColors.textPrimary,
-                                unfocusedTextColor = FFColors.textPrimary
-                            ),
-                            singleLine = true,
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.width(60.dp)
-                        )
-
-                        Text(":", color = FFColors.textPrimary, fontWeight = FontWeight.Bold)
-
-                        OutlinedTextField(
-                            value = endMinute,
-                            onValueChange = { newVal ->
-                                val clean = newVal.filter { it.isDigit() }.take(2)
-                                if (clean.isEmpty()) {
-                                    endMinute = ""
-                                } else {
-                                    val num = clean.toIntOrNull() ?: 0
-                                    if (num in 0..59) {
-                                        endMinute = clean
-                                    }
-                                }
-                            },
-                            placeholder = { Text("00", color = FFColors.textDisabled) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = FFColors.orange,
-                                unfocusedBorderColor = FFColors.borderSubtle,
-                                focusedTextColor = FFColors.textPrimary,
-                                unfocusedTextColor = FFColors.textPrimary
-                            ),
-                            singleLine = true,
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.width(60.dp)
-                        )
-
-                        Spacer(modifier = Modifier.width(4.dp))
-
-                        // Segmented AM/PM Row
-                        Row(
-                            modifier = Modifier
-                                .background(FFColors.surfaceAlt, RoundedCornerShape(8.dp))
-                                .padding(2.dp)
-                        ) {
-                            listOf("AM", "PM").forEach { opt ->
-                                val active = opt == endAmPm
-                                Box(
-                                    modifier = Modifier
-                                        .background(
-                                            color = if (active) FFColors.orange else Color.Transparent,
-                                            shape = RoundedCornerShape(6.dp)
-                                        )
-                                        .clickable { endAmPm = opt }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                                ) {
-                                    Text(
-                                        text = opt,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (active) Color.White else FFColors.textSecondary
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // Show overlap warning if conflict exists
-                    if (conflictBlock != null) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(FFColors.red.copy(alpha = 0.1f), RoundedCornerShape(12.dp))
-                                .border(1.dp, FFColors.red.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
-                                .padding(12.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.Warning,
-                                    contentDescription = "Conflict Warning",
-                                    tint = FFColors.red,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "Conflict: Overlaps with \"${conflictBlock.task}\" (${conflictBlock.startTime} - ${conflictBlock.endTime})",
-                                    color = FFColors.red,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
+                    )
                 }
             },
             confirmButton = {
@@ -3975,11 +3776,9 @@ fun ProfileScreen(viewModel: FocusViewModel) {
                     onClick = {
                         val finalStartH = startHour.padStart(2, '0').ifEmpty { "12" }
                         val finalStartM = startMinute.padStart(2, '0').ifEmpty { "00" }
-                        val finalEndH = endHour.padStart(2, '0').ifEmpty { "12" }
-                        val finalEndM = endMinute.padStart(2, '0').ifEmpty { "00" }
 
                         val finalStart = "$finalStartH:$finalStartM $startAmPm"
-                        val finalEnd = "$finalEndH:$finalEndM $endAmPm"
+                        val finalEnd = finalStart
                         val taskToSave = selectedTask.trim().ifEmpty { "Deep Work" }
 
                         showScheduleModal = false
@@ -3987,6 +3786,12 @@ fun ProfileScreen(viewModel: FocusViewModel) {
                             viewModel.editScheduleBlock(editingSchedule!!, ScheduleEntry(selectedDay, finalStart, finalEnd, taskToSave))
                         } else {
                             viewModel.addScheduleBlock(ScheduleEntry(selectedDay, finalStart, finalEnd, taskToSave))
+                        }
+                        if (selectedDayFilter != "All" && !selectedDayFilter.equals(selectedDay, ignoreCase = true)) {
+                            selectedDayFilter = selectedDay
+                        }
+                        if (selectedTaskFilter != "All" && !taskToSave.contains(selectedTaskFilter, ignoreCase = true)) {
+                            selectedTaskFilter = "All"
                         }
                         editingSchedule = null
                     },
@@ -3996,7 +3801,7 @@ fun ProfileScreen(viewModel: FocusViewModel) {
                     )
                 ) {
                     Text(
-                        text = if (isEditing) "Save Changes" else "Block Focus",
+                        text = if (isEditing) "Save Changes" else "Set Reminder",
                         fontWeight = FontWeight.Bold,
                         color = if (FFColors.isDark) Color.Black else Color.White
                     )
@@ -4086,6 +3891,82 @@ fun SettingRowToggle(
     }
 }
 
+@Composable
+fun SettingRowAction(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(vertical = 16.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.weight(1f)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(FFColors.surfaceAlt, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(imageVector = icon, contentDescription = null, tint = FFColors.textSecondary, modifier = Modifier.size(24.dp))
+            }
+            Spacer(modifier = Modifier.width(18.dp))
+            Text(
+                text = label,
+                color = FFColors.textPrimary,
+                fontSize = 16.sp,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+        }
+        Icon(
+            imageVector = Icons.Default.KeyboardArrowRight,
+            contentDescription = null,
+            tint = FFColors.textDisabled,
+            modifier = Modifier.size(24.dp)
+        )
+    }
+}
+
+fun Modifier.tutorialHighlight(
+    isActive: Boolean,
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(20.dp)
+): Modifier = this.composed {
+    if (isActive) {
+        val infiniteTransition = rememberInfiniteTransition(label = "highlight_glow")
+        val glowAlpha by infiniteTransition.animateFloat(
+            initialValue = 0.4f,
+            targetValue = 1.0f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(1200, easing = EaseInOutSine),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "glowAlpha"
+        )
+        val scale by infiniteTransition.animateFloat(
+            initialValue = 0.99f,
+            targetValue = 1.015f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(1200, easing = EaseInOutSine),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "scale"
+        )
+        
+        this
+            .scale(scale)
+            .border(3.dp, FFColors.orange.copy(alpha = glowAlpha), shape)
+    } else {
+        this
+    }
+}
+
 fun parseTimeString(timeStr: String): Triple<String, String, Boolean> {
     var hour = "09"
     var minute = "00"
@@ -4169,5 +4050,434 @@ fun getTaskIcon(taskName: String): ImageVector {
         "creative", "creative / art", "design" -> Icons.Default.Palette
         "meditation", "meditation / zen", "zen", "breathwork" -> Icons.Default.Favorite
         else -> Icons.Default.Work
+    }
+}
+
+@Composable
+fun WheelColumn(
+    items: List<String>,
+    initialIndex: Int,
+    onItemSelected: (index: Int) -> Unit,
+    modifier: Modifier = Modifier,
+    itemHeight: androidx.compose.ui.unit.Dp = 46.dp,
+    visibleItemsCount: Int = 5,
+    isContinuous: Boolean = true
+) {
+    if (items.isEmpty()) return
+
+    val itemHeightPx = with(androidx.compose.ui.platform.LocalDensity.current) { itemHeight.toPx() }
+    val paddingItems = visibleItemsCount / 2
+    
+    val virtualSize = if (isContinuous) items.size * 10000 else items.size
+    val startIndex = remember(initialIndex, items.size, isContinuous) {
+        val safeInit = initialIndex.coerceIn(0, items.size - 1)
+        if (isContinuous) {
+            val halfVirtualSize = virtualSize / 2
+            halfVirtualSize - (halfVirtualSize % items.size) + safeInit
+        } else {
+            safeInit
+        }
+    }
+    
+    val currentOnItemSelected by rememberUpdatedState(onItemSelected)
+    val lazyListState = rememberLazyListState(initialFirstVisibleItemIndex = startIndex)
+
+    // Track the index we last reported to the parent to prevent circular scroll feedback loops
+    var lastReportedIndex by remember { mutableStateOf(initialIndex) }
+    val coroutineScope = rememberCoroutineScope()
+    var isFirstLoad by remember { mutableStateOf(true) }
+
+    // Sync with external updates only if the list is NOT actively scrolling (e.g. from dialog changes)
+    LaunchedEffect(initialIndex) {
+        if (items.isNotEmpty() && !lazyListState.isScrollInProgress) {
+            val safeInit = initialIndex.coerceIn(0, items.size - 1)
+            val currentRealIndex = lazyListState.firstVisibleItemIndex % items.size
+            if (safeInit != currentRealIndex) {
+                lastReportedIndex = safeInit
+                if (isContinuous) {
+                    val halfVirtualSize = virtualSize / 2
+                    val targetStartIndex = halfVirtualSize - (halfVirtualSize % items.size) + safeInit
+                    if (isFirstLoad) {
+                        lazyListState.scrollToItem(targetStartIndex)
+                        isFirstLoad = false
+                    } else {
+                        lazyListState.animateScrollToItem(targetStartIndex)
+                    }
+                } else {
+                    if (isFirstLoad) {
+                        lazyListState.scrollToItem(safeInit)
+                        isFirstLoad = false
+                    } else {
+                        lazyListState.animateScrollToItem(safeInit)
+                    }
+                }
+            }
+        }
+    }
+
+    // Report selection changes only when scrolling/snapping is complete
+    LaunchedEffect(lazyListState) {
+        snapshotFlow { lazyListState.isScrollInProgress }
+            .collect { isScrolling ->
+                if (!isScrolling && items.isNotEmpty()) {
+                    val scrollOffset = lazyListState.firstVisibleItemScrollOffset
+                    val baseIndex = lazyListState.firstVisibleItemIndex
+                    val targetIndex = if (itemHeightPx > 0f && scrollOffset > itemHeightPx / 2) {
+                        baseIndex + 1
+                    } else {
+                        baseIndex
+                    }
+                    val realIndex = targetIndex % items.size
+                    if (realIndex != lastReportedIndex) {
+                        lastReportedIndex = realIndex
+                        currentOnItemSelected(realIndex)
+                    }
+                }
+            }
+    }
+
+    // Track current index smoothly for sharp color/weight highlighting
+    val currentIndex by remember {
+        derivedStateOf {
+            if (items.isEmpty()) 0 else {
+                val scrollOffset = lazyListState.firstVisibleItemScrollOffset
+                val baseIndex = lazyListState.firstVisibleItemIndex
+                val targetIndex = if (itemHeightPx > 0f && scrollOffset > itemHeightPx / 2) {
+                    baseIndex + 1
+                } else {
+                    baseIndex
+                }
+                targetIndex % items.size
+            }
+        }
+    }
+
+    val density = androidx.compose.ui.platform.LocalDensity.current.density
+
+    Box(
+        modifier = modifier
+            .height(itemHeight * visibleItemsCount),
+        contentAlignment = Alignment.Center
+    ) {
+        LazyColumn(
+            state = lazyListState,
+            flingBehavior = androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior(lazyListState = lazyListState),
+            contentPadding = PaddingValues(vertical = itemHeight * paddingItems),
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            items(
+                count = virtualSize,
+                key = { it }
+            ) { index ->
+                val realIndex = index % items.size
+                val item = items[realIndex]
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(itemHeight)
+                        .clickable(
+                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            coroutineScope.launch {
+                                lazyListState.animateScrollToItem(index)
+                            }
+                        }
+                        .graphicsLayer {
+                            // Read scroll offset inside graphicsLayer to skip recomposition entirely
+                            val firstVisibleIndex = lazyListState.firstVisibleItemIndex
+                            val firstVisibleOffset = lazyListState.firstVisibleItemScrollOffset
+                            val divisor = if (itemHeightPx > 0f) itemHeightPx else 1f
+                            val fractionalIndex = firstVisibleIndex + (firstVisibleOffset / divisor)
+                            val distance = index - fractionalIndex
+                            
+                            val rotationXVal = distance * -28f
+                            val scaleVal = (1.2f - kotlin.math.abs(distance) * 0.18f).coerceIn(0.7f, 1.2f)
+                            val alphaVal = (1.0f - kotlin.math.abs(distance) * 0.38f).coerceIn(0.12f, 1.0f)
+                            
+                            cameraDistance = 16f * density
+                            this.rotationX = rotationXVal
+                            scaleX = scaleVal
+                            scaleY = scaleVal
+                            this.alpha = alphaVal
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    val isCurrent = realIndex == currentIndex
+                    Text(
+                        text = item,
+                        fontSize = if (isCurrent) 24.sp else 18.sp,
+                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                        color = if (isCurrent) Color.White else Color.White.copy(alpha = 0.3f),
+                        letterSpacing = 0.5.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun WheelTimePicker(
+    selectedHour: String,
+    selectedMinute: String,
+    selectedAmPm: String,
+    onTimeChanged: (hour: String, minute: String, amPm: String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val hours = remember { (1..12).map { String.format("%02d", it) } }
+    val minutes = remember { (0..59).map { String.format("%02d", it) } }
+    val amPmList = remember { listOf("AM", "PM") }
+
+    val initialHourIndex = remember(selectedHour) { hours.indexOf(selectedHour.padStart(2, '0')).coerceAtLeast(0) }
+    val initialMinuteIndex = remember(selectedMinute) { minutes.indexOf(selectedMinute.padStart(2, '0')).coerceAtLeast(0) }
+    val initialAmPmIndex = remember(selectedAmPm) { amPmList.indexOf(selectedAmPm.uppercase()).coerceAtLeast(0) }
+
+    val itemHeight = 46.dp
+    val visibleItemsCount = 5
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(Color.Transparent)
+            .padding(vertical = 4.dp, horizontal = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        // High-end minimalist selection window overlay (two horizontal selection borders across whole picker)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(itemHeight),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(0.5.dp)
+                    .background(Color.White.copy(alpha = 0.1f))
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(0.5.dp)
+                    .background(Color.White.copy(alpha = 0.1f))
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Hour Wheel
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                WheelColumn(
+                    items = hours,
+                    initialIndex = initialHourIndex,
+                    onItemSelected = { index ->
+                        onTimeChanged(hours[index], selectedMinute, selectedAmPm)
+                    },
+                    itemHeight = itemHeight,
+                    visibleItemsCount = visibleItemsCount
+                )
+            }
+
+            Text(
+                text = ":",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White.copy(alpha = 0.5f),
+                modifier = Modifier.padding(horizontal = 2.dp)
+            )
+
+            // Minute Wheel
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                WheelColumn(
+                    items = minutes,
+                    initialIndex = initialMinuteIndex,
+                    onItemSelected = { index ->
+                        onTimeChanged(selectedHour, minutes[index], selectedAmPm)
+                    },
+                    itemHeight = itemHeight,
+                    visibleItemsCount = visibleItemsCount
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // AM/PM Wheel
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                WheelColumn(
+                    items = amPmList,
+                    initialIndex = initialAmPmIndex,
+                    onItemSelected = { index ->
+                        onTimeChanged(selectedHour, selectedMinute, amPmList[index])
+                    },
+                    itemHeight = itemHeight,
+                    visibleItemsCount = visibleItemsCount,
+                    isContinuous = false
+                )
+            }
+        }
+    }
+}
+
+
+@Composable
+fun WheelDurationPicker(
+    durationHrs: Int,
+    durationMins: Int,
+    durationSecs: Int,
+    onDurationChanged: (hrs: Int, mins: Int, secs: Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val hours = remember { (0..23).map { String.format("%02d", it) } }
+    val minutes = remember { (0..59).map { String.format("%02d", it) } }
+    val seconds = remember { (0..59).map { String.format("%02d", it) } }
+
+    val initialHourIndex = remember(durationHrs) { durationHrs.coerceIn(0, 23) }
+    val initialMinuteIndex = remember(durationMins) { durationMins.coerceIn(0, 59) }
+    val initialSecondIndex = remember(durationSecs) { durationSecs.coerceIn(0, 59) }
+
+    val itemHeight = 46.dp
+    val visibleItemsCount = 5
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Headers Row
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "HOURS",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = FFColors.textMuted,
+                letterSpacing = 1.sp,
+                modifier = Modifier.weight(1f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(modifier = Modifier.width(16.dp)) // space for colon alignment
+            Text(
+                text = "MINUTES",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = FFColors.textMuted,
+                letterSpacing = 1.sp,
+                modifier = Modifier.weight(1f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(modifier = Modifier.width(16.dp)) // space for colon alignment
+            Text(
+                text = "SECONDS",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = FFColors.textMuted,
+                letterSpacing = 1.sp,
+                modifier = Modifier.weight(1f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // Wheels Box
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            // High-end minimalist selection lines centered perfectly with the wheels
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(itemHeight),
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(0.5.dp)
+                        .background(Color.White.copy(alpha = 0.1f))
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(0.5.dp)
+                        .background(Color.White.copy(alpha = 0.1f))
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Hours Wheel
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    WheelColumn(
+                        items = hours,
+                        initialIndex = initialHourIndex,
+                        onItemSelected = { index ->
+                            onDurationChanged(index, durationMins, durationSecs)
+                        },
+                        itemHeight = itemHeight,
+                        visibleItemsCount = visibleItemsCount
+                    )
+                }
+
+                Text(
+                    text = ":",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(horizontal = 2.dp)
+                )
+
+                // Minutes Wheel
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    WheelColumn(
+                        items = minutes,
+                        initialIndex = initialMinuteIndex,
+                        onItemSelected = { index ->
+                            onDurationChanged(durationHrs, index, durationSecs)
+                        },
+                        itemHeight = itemHeight,
+                        visibleItemsCount = visibleItemsCount
+                    )
+                }
+
+                Text(
+                    text = ":",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(horizontal = 2.dp)
+                )
+
+                // Seconds Wheel
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    WheelColumn(
+                        items = seconds,
+                        initialIndex = initialSecondIndex,
+                        onItemSelected = { index ->
+                            onDurationChanged(durationHrs, durationMins, index)
+                        },
+                        itemHeight = itemHeight,
+                        visibleItemsCount = visibleItemsCount
+                    )
+                }
+            }
+        }
     }
 }

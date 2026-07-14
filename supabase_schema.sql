@@ -77,7 +77,7 @@ CREATE POLICY "Users can update own sessions"
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO public.profile (user_id, email, display_name, daily_goal, notifications, dark_mode, privacy_mode, preferred_apps, schedule)
+    INSERT INTO public.profile (user_id, email, display_name, daily_goal, notifications, dark_mode, privacy_mode, preferred_apps, schedule, photo_url)
     VALUES (
         new.id,
         new.email,
@@ -91,7 +91,13 @@ BEGIN
         TRUE,
         FALSE,
         '[]'::JSONB,
-        '[]'::JSONB
+        '[]'::JSONB,
+        COALESCE(
+            new.raw_user_meta_data->>'avatar_url',
+            new.raw_user_meta_data->>'avatarUrl',
+            new.raw_user_meta_data->>'photo_url',
+            new.raw_user_meta_data->>'photoUrl'
+        )
     )
     ON CONFLICT (user_id) DO NOTHING;
     RETURN new;
@@ -206,3 +212,11 @@ BEGIN
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ====================================================================
+-- 5. Database Performance Indexes (Optimized for premium scalability)
+-- ====================================================================
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON public.sessions (user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_completed ON public.sessions (completed);
+CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON public.sessions (started_at);
+
